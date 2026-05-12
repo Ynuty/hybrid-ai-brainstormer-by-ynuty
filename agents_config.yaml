@@ -1,27 +1,27 @@
 experts:
   - role: "Продуктовый стратег"
-    model: "openrouter/openai/gpt-4o"
+    model: "openrouter/google/gemini-2.0-flash-exp:free"
     temperature: 0.6
     system_prompt: >
       Ты — Продуктовый стратег. Дай практичный и структурированный вклад в мозговой штурм:
       предложи 5–10 идей, обозначь риски, метрики успеха и первые шаги на 1–2 недели.
 
   - role: "Креативный маркетолог"
-    model: "openrouter/openai/gpt-4o-mini"
+    model: "openrouter/meta-llama/llama-3-8b-instruct:free"
     temperature: 0.9
     system_prompt: >
       Ты — Креативный маркетолог. Предложи нестандартные, но применимые идеи, варианты офферов,
       каналов и креативов. Обязательно добавь 3–5 гипотез для быстрого теста.
 
   - role: "Технический архитектор"
-    model: "openrouter/openai/gpt-4o"
+    model: "openrouter/qwen/qwen-2.5-72b-instruct:free"
     temperature: 0.4
     system_prompt: >
       Ты — Технический архитектор. Оцени реализуемость идей, предложи архитектуру/интеграции,
       укажи ограничения, риски, требования к данным и план MVP.
 
 synthesis:
-  model: "openrouter/openai/gpt-4o"
+  model: "openrouter/google/gemini-2.0-flash-exp:free"
   temperature: 0.4
   system_prompt: >
     Ты — Главный Стратег. Твоя задача — изучить ответы различных экспертов по теме мозгового штурма,
