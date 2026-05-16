@@ -205,10 +205,6 @@ def _debate_all_to_markdown(data: dict) -> str:
 
 
 def _render_debate_result(data: dict) -> None:
-    st.subheader("Финальное отредактированное решение")
-    st.caption("Это итоговый Markdown-документ после спора моделей и внесения правок.")
-    st.markdown(data.get("final_synthesis", "") or "_пусто_")
-
     debate_report = data.get("debate_report", "") or "_журнал спора пуст_"
     download_cols = st.columns(3)
     download_cols[0].download_button(
@@ -232,6 +228,10 @@ def _render_debate_result(data: dict) -> None:
         mime="text/markdown",
         key="download_debate_all",
     )
+
+    with st.expander("Итоговое решение", expanded=True):
+        st.caption("Это итоговый Markdown-документ после спора моделей и внесения правок.")
+        st.markdown(data.get("final_synthesis", "") or "_пусто_")
 
     with st.expander("Ход обсуждения"):
         _render_response_list("Раунд 1: первичные ответы", data.get("initial_responses") or [])
@@ -380,7 +380,23 @@ with st.sidebar:
                 st.session_state.selected_history_index = index
 
 
-topic = st.text_input("Тема мозгового штурма", placeholder="Например: запуск MVP за 2 недели")
+topic_tab, comments_tab = st.tabs(["Тема", "Комментарии"])
+with topic_tab:
+    topic = st.text_input("Тема мозгового штурма", placeholder="Например: запуск MVP за 2 недели")
+with comments_tab:
+    initial_comments = st.text_area(
+        "Что нужно получить и на чём сделать акцент",
+        placeholder=(
+            "Например: нужен практичный план запуска, акцент на дешёвую реализацию, "
+            "B2B-аудиторию и быстрые тесты спроса"
+        ),
+    )
+    initial_context_files = st.file_uploader(
+        "Добавить файлы в контекст первого запуска",
+        type=["txt", "md", "json", "csv", "py", "yaml", "yml"],
+        accept_multiple_files=True,
+        key="initial_context_files",
+    )
 
 button_cols = st.columns(2)
 run_clicked = button_cols[0].button("Запустить", type="primary")
@@ -473,7 +489,12 @@ if run_clicked or debate_clicked:
     if not topic or not topic.strip():
         st.warning("Введите тему.")
     else:
-        payload = {"topic": topic.strip()}
+        initial_files_context = _uploaded_files_context(initial_context_files)
+        payload = {
+            "topic": topic.strip(),
+            "context": initial_files_context or None,
+            "comments": initial_comments.strip() or None,
+        }
         is_debate = debate_clicked
         request_url = DEBATE_URL if is_debate else BRAINSTORM_URL
         mode = "debate" if is_debate else "fast"
