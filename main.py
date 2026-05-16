@@ -53,7 +53,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-DEFAULT_MODEL = os.getenv("BRAINSTORM_MODEL", "openrouter/openai/gpt-4o")
+DEFAULT_MODEL = os.getenv("BRAINSTORM_MODEL", "openrouter/openai/gpt-5.1")
 SYNTHESIS_MODEL = os.getenv("SYNTHESIS_MODEL", DEFAULT_MODEL)
 CONFIG_PATH = Path(os.getenv("AGENTS_CONFIG_PATH", "agents_config.yaml"))
 MODEL_TIMEOUT_S = _env_float("MODEL_TIMEOUT_S", 120)
@@ -285,6 +285,8 @@ async def _startup() -> None:
 
 class BrainstormRequest(BaseModel):
     topic: str
+    context: str | None = None
+    comments: str | None = None
 
 
 class AgentQuestionRequest(BaseModel):
@@ -341,8 +343,13 @@ async def _completion_content(
     raise last_exc
 
 
-async def call_expert_yaml(agent: AgentSpec, topic: str) -> dict[str, Any]:
-    user_prompt = f"Тема мозгового штурма: {topic}"
+async def call_expert_yaml(
+    agent: AgentSpec,
+    topic: str,
+    context: str | None = None,
+    comments: str | None = None,
+) -> dict[str, Any]:
+    user_prompt = build_topic_prompt(topic, context, comments)
     try:
         content, used_model = await _completion_content(
             model=agent.model,
@@ -374,9 +381,14 @@ async def call_expert_yaml(agent: AgentSpec, topic: str) -> dict[str, Any]:
         }
 
 
-async def call_expert_fallback(role: str, topic: str) -> dict[str, Any]:
+async def call_expert_fallback(
+    role: str,
+    topic: str,
+    context: str | None = None,
+    comments: str | None = None,
+) -> dict[str, Any]:
     system_prompt = _default_agent_prompt(role)
-    user_prompt = f"Тема мозгового штурма: {topic}"
+    user_prompt = build_topic_prompt(topic, context, comments)
     try:
         content, used_model = await _completion_content(
             model=DEFAULT_MODEL,
@@ -486,7 +498,26 @@ def _active_synthesis() -> SynthesisSpec:
     )
 
 
-async def synthesize_results(topic: str, agent_responses: list[Any]) -> str:
+def build_topic_prompt(
+    topic: str,
+    context: str | None = None,
+    comments: str | None = None,
+) -> str:
+    parts = [f"Тема мозгового штурма: {topic}"]
+    if context and context.strip():
+        parts.append(f"Контекст предыдущих результатов и файлов:\n{context.strip()}")
+    if comments and comments.strip():
+        parts.append(f"Комментарии пользователя к повторному запуску:\n{comments.strip()}")
+        parts.append("Переработай решение с учётом этих комментариев и контекста.")
+    return "\n\n".join(parts)
+
+
+async def synthesize_results(
+    topic: str,
+    agent_responses: list[Any],
+    context: str | None = None,
+    comments: str | None = None,
+) -> str:
     successful_responses = [item for item in agent_responses if item.get("success") and item.get("response")]
     if not successful_responses:
         raise RuntimeError("no successful expert responses")
@@ -505,7 +536,7 @@ async def synthesize_results(topic: str, agent_responses: list[Any]) -> str:
     )
 
     synthesis_user_prompt = (
-        f"Тема: {topic}\n\n"
+        f"{build_topic_prompt(topic, context, comments)}\n\n"
         "Ответы экспертов:\n"
         f"{joined_responses}\n\n"
         "Сформируй единый итог: краткое резюме и пошаговый план."
@@ -528,18 +559,24 @@ async def synthesize_results(topic: str, agent_responses: list[Any]) -> str:
         raise
 
 
-async def run_initial_expert_round(topic: str) -> list[dict[str, Any]]:
-    tasks = [call_expert_yaml(agent, topic) for agent in _active_agents()]
+async def run_initial_expert_round(
+    topic: str,
+    context: str | None = None,
+    comments: str | None = None,
+) -> list[dict[str, Any]]:
+    tasks = [call_expert_yaml(agent, topic, context, comments) for agent in _active_agents()]
     return await asyncio.gather(*tasks)
 
 
 async def run_debate_round(
     topic: str,
     initial_responses: list[dict[str, Any]],
+    context: str | None = None,
+    comments: str | None = None,
 ) -> list[dict[str, Any]]:
     initial_context = _format_responses_for_prompt(initial_responses)
     user_prompt = (
-        f"Тема: {topic}\n\n"
+        f"{build_topic_prompt(topic, context, comments)}\n\n"
         "Ниже первичные ответы всех экспертов:\n\n"
         f"{initial_context}\n\n"
         "Проанализируй ответы других экспертов и дай конструктивную критику. "
@@ -561,6 +598,8 @@ async def run_revision_round(
     topic: str,
     initial_responses: list[dict[str, Any]],
     critiques: list[dict[str, Any]],
+    context: str | None = None,
+    comments: str | None = None,
 ) -> list[dict[str, Any]]:
     critique_context = _format_responses_for_prompt(critiques)
     tasks = []
@@ -576,7 +615,7 @@ async def run_revision_round(
             or "Первичный ответ отсутствует."
         )
         user_prompt = (
-            f"Тема: {topic}\n\n"
+            f"{build_topic_prompt(topic, context, comments)}\n\n"
             "Твой первичный ответ:\n\n"
             f"{own_initial_text}\n\n"
             "Критика и предложения других экспертов:\n\n"
@@ -600,6 +639,8 @@ async def synthesize_debate_results(
     topic: str,
     revised_responses: list[dict[str, Any]],
     critiques: list[dict[str, Any]],
+    context: str | None = None,
+    comments: str | None = None,
 ) -> str:
     successful_revisions = [
         item for item in revised_responses if item.get("success") and item.get("response")
@@ -614,7 +655,7 @@ async def synthesize_debate_results(
     )
 
     user_prompt = (
-        f"Тема: {topic}\n\n"
+        f"{build_topic_prompt(topic, context, comments)}\n\n"
         "Доработанные ответы экспертов:\n\n"
         f"{_format_responses_for_prompt(successful_revisions)}\n\n"
         "Журнал критики и спора:\n\n"
@@ -709,10 +750,13 @@ async def brainstorm(payload: BrainstormRequest):
 
     agents = _AGENTS
     if agents:
-        tasks = [call_expert_yaml(a, topic) for a in agents]
+        tasks = [call_expert_yaml(a, topic, payload.context, payload.comments) for a in agents]
         agent_responses = await asyncio.gather(*tasks)
     else:
-        tasks = [call_expert_fallback(role, topic) for role in EXPERT_ROLES]
+        tasks = [
+            call_expert_fallback(role, topic, payload.context, payload.comments)
+            for role in EXPERT_ROLES
+        ]
         agent_responses = await asyncio.gather(*tasks)
 
     failed_count = len([item for item in agent_responses if not item.get("success")])
@@ -720,7 +764,12 @@ async def brainstorm(payload: BrainstormRequest):
         logger.warning("brainstorm: %d/%d expert agents failed", failed_count, len(agent_responses))
 
     try:
-        final_synthesis = await synthesize_results(topic, agent_responses)
+        final_synthesis = await synthesize_results(
+            topic,
+            agent_responses,
+            payload.context,
+            payload.comments,
+        )
     except Exception as exc:
         logger.exception("brainstorm: synthesis stage failed: %s", exc)
         raise HTTPException(
@@ -742,7 +791,7 @@ async def brainstorm_debate(payload: BrainstormRequest):
         logger.warning("brainstorm_debate: empty topic rejected")
         raise HTTPException(status_code=400, detail="Topic cannot be empty.")
 
-    initial_responses = await run_initial_expert_round(topic)
+    initial_responses = await run_initial_expert_round(topic, payload.context, payload.comments)
     if not any(item.get("success") for item in initial_responses):
         logger.warning("brainstorm_debate: all initial expert agents failed")
         raise HTTPException(
@@ -750,7 +799,7 @@ async def brainstorm_debate(payload: BrainstormRequest):
             detail="Не удалось получить первичные ответы экспертов. Попробуйте повторить запрос позже.",
         )
 
-    critiques = await run_debate_round(topic, initial_responses)
+    critiques = await run_debate_round(topic, initial_responses, payload.context, payload.comments)
     if not any(item.get("success") for item in critiques):
         logger.warning("brainstorm_debate: all critique agents failed")
         raise HTTPException(
@@ -758,7 +807,13 @@ async def brainstorm_debate(payload: BrainstormRequest):
             detail="Не удалось провести раунд критики моделей. Попробуйте повторить запрос позже.",
         )
 
-    revised_responses = await run_revision_round(topic, initial_responses, critiques)
+    revised_responses = await run_revision_round(
+        topic,
+        initial_responses,
+        critiques,
+        payload.context,
+        payload.comments,
+    )
     if not any(item.get("success") for item in revised_responses):
         logger.warning("brainstorm_debate: all revision agents failed")
         raise HTTPException(
@@ -767,7 +822,13 @@ async def brainstorm_debate(payload: BrainstormRequest):
         )
 
     try:
-        final_synthesis = await synthesize_debate_results(topic, revised_responses, critiques)
+        final_synthesis = await synthesize_debate_results(
+            topic,
+            revised_responses,
+            critiques,
+            payload.context,
+            payload.comments,
+        )
     except Exception as exc:
         logger.exception("brainstorm_debate: synthesis stage failed: %s", exc)
         raise HTTPException(

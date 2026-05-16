@@ -24,12 +24,12 @@ ASK_AGENT_URL = f"{BACKEND_URL}/agents/ask"
 HEALTH_URL = f"{BACKEND_URL}/health"
 
 MODEL_DESCRIPTIONS = {
-    "openrouter/openai/gpt-4o": "GPT-4o от OpenAI — холодный рассудок, бизнес-логика и структура.",
-    "openrouter/anthropic/claude-3.5-sonnet": (
-        "Claude 3.5 Sonnet от Anthropic — тексты, виральность, подача и нестандартный подход."
+    "openrouter/openai/gpt-5.1": "GPT-5.1 от OpenAI — сильная стратегия, рассуждения и структура.",
+    "openrouter/anthropic/claude-sonnet-4.6": (
+        "Claude Sonnet 4.6 от Anthropic — тексты, виральность, подача и нестандартный подход."
     ),
-    "openrouter/google/gemini-1.5-pro": (
-        "Gemini 1.5 Pro от Google — архитектура, инструменты и техническая реализация."
+    "openrouter/~google/gemini-pro-latest": (
+        "Gemini Pro Latest от Google — архитектура, инструменты и техническая реализация."
     ),
 }
 
@@ -41,9 +41,9 @@ ROLE_FUNCTIONS = {
 }
 
 MODEL_LABELS = {
-    "openrouter/openai/gpt-4o": "GPT-4o",
-    "openrouter/anthropic/claude-3.5-sonnet": "Claude 3.5 Sonnet",
-    "openrouter/google/gemini-1.5-pro": "Gemini 1.5 Pro",
+    "openrouter/openai/gpt-5.1": "GPT-5.1",
+    "openrouter/anthropic/claude-sonnet-4.6": "Claude Sonnet 4.6",
+    "openrouter/~google/gemini-pro-latest": "Gemini Pro Latest",
 }
 
 st.set_page_config(page_title="AI Brainstorm", layout="wide")
@@ -55,6 +55,9 @@ if "brainstorm_history" not in st.session_state:
 
 if "health_data" not in st.session_state:
     st.session_state.health_data = {}
+
+if "selected_history_index" not in st.session_state:
+    st.session_state.selected_history_index = None
 
 
 def _backend_error_message(response: requests.Response) -> str:
@@ -77,6 +80,24 @@ def _agent_option_label(item: dict) -> str:
     role = item.get("role", "")
     function = ROLE_FUNCTIONS.get(role, role or "универсальная помощь")
     return f"{_model_display_name(model, role)} · {function}"
+
+
+def _history_mode_label(mode: str | None) -> str:
+    labels = {
+        "fast": "быстрый",
+        "debate": "спор",
+        "ask_agent": "вопрос",
+        "fast_rerun": "повтор",
+        "debate_rerun": "повтор спора",
+    }
+    return labels.get(mode or "", "быстрый")
+
+
+def _history_title(entry: dict) -> str:
+    topic = entry.get("topic") or "без темы"
+    if len(topic) > 60:
+        topic = f"{topic[:57]}..."
+    return f"{entry.get('created_at', '--:--')} · {_history_mode_label(entry.get('mode'))} · {topic}"
 
 
 def _result_to_markdown(data: dict) -> str:
@@ -164,18 +185,52 @@ def _render_response_list(title: str, responses: list[dict]) -> None:
         st.divider()
 
 
+def _debate_final_to_markdown(data: dict) -> str:
+    return "\n\n".join(
+        [
+            f"# Итоговое решение: {data.get('topic', '')}",
+            data.get("final_synthesis", "") or "_пусто_",
+        ]
+    )
+
+
+def _debate_all_to_markdown(data: dict) -> str:
+    return "\n\n".join(
+        [
+            _debate_final_to_markdown(data),
+            "## Ход дискуссии",
+            data.get("debate_report", "") or "_журнал спора пуст_",
+        ]
+    )
+
+
 def _render_debate_result(data: dict) -> None:
     st.subheader("Финальное отредактированное решение")
     st.caption("Это итоговый Markdown-документ после спора моделей и внесения правок.")
     st.markdown(data.get("final_synthesis", "") or "_пусто_")
 
     debate_report = data.get("debate_report", "") or "_журнал спора пуст_"
-    st.download_button(
-        "Скачать журнал спора в Markdown",
-        data=debate_report,
-        file_name="model_debate_report.md",
+    download_cols = st.columns(3)
+    download_cols[0].download_button(
+        "Скачать итоговое решение",
+        data=_debate_final_to_markdown(data),
+        file_name="final_solution.md",
         mime="text/markdown",
-        key="download_debate_report",
+        key="download_debate_final",
+    )
+    download_cols[1].download_button(
+        "Скачать ход дискуссии",
+        data=debate_report,
+        file_name="model_debate_discussion.md",
+        mime="text/markdown",
+        key="download_debate_discussion",
+    )
+    download_cols[2].download_button(
+        "Скачать всё вместе",
+        data=_debate_all_to_markdown(data),
+        file_name="debate_full_result.md",
+        mime="text/markdown",
+        key="download_debate_all",
     )
 
     with st.expander("Ход обсуждения"):
@@ -212,11 +267,20 @@ def _render_ask_result(data: dict) -> None:
     )
 
 
-def _last_history_context() -> str:
-    if not st.session_state.brainstorm_history:
+def _selected_history_entry() -> dict | None:
+    history = st.session_state.brainstorm_history
+    selected_index = st.session_state.selected_history_index
+    if not history:
+        return None
+    if selected_index is None or not 0 <= selected_index < len(history):
+        return history[-1]
+    return history[selected_index]
+
+
+def _history_entry_to_context(entry: dict | None) -> str:
+    if not entry:
         return ""
 
-    entry = st.session_state.brainstorm_history[-1]
     data = entry.get("data") or {}
     mode = entry.get("mode")
 
@@ -255,6 +319,37 @@ def _last_history_context() -> str:
     )
 
 
+def _last_history_context() -> str:
+    return _history_entry_to_context(_selected_history_entry())
+
+
+def _uploaded_files_context(uploaded_files: list | None) -> str:
+    if not uploaded_files:
+        return ""
+
+    sections = []
+    for uploaded_file in uploaded_files:
+        raw = uploaded_file.getvalue()
+        text = raw.decode("utf-8", errors="replace")
+        if len(text) > 80000:
+            text = f"{text[:80000]}\n\n[Файл обрезан до 80000 символов для контекста.]"
+        sections.append(
+            "\n\n".join(
+                [
+                    f"## Файл: {uploaded_file.name}",
+                    text or "_файл пуст_",
+                ]
+            )
+        )
+
+    return "\n\n".join(["# Контекст из загруженных файлов", *sections])
+
+
+def _merge_context_parts(*parts: str) -> str | None:
+    context = "\n\n".join([part for part in parts if part and part.strip()])
+    return context or None
+
+
 with st.sidebar:
     st.header("Состояние")
     try:
@@ -275,14 +370,14 @@ with st.sidebar:
     st.header("История")
     if not st.session_state.brainstorm_history:
         st.caption("Запросов пока нет.")
-    for item in reversed(st.session_state.brainstorm_history[-5:]):
-        if item.get("mode") == "debate":
-            mode_label = "спор"
-        elif item.get("mode") == "ask_agent":
-            mode_label = "вопрос"
-        else:
-            mode_label = "быстрый"
-        st.caption(f"{item['created_at']} · {mode_label} · {item['topic']}")
+    else:
+        history_indices = list(range(len(st.session_state.brainstorm_history)))
+        for index in reversed(history_indices[-8:]):
+            item = st.session_state.brainstorm_history[index]
+            is_selected = index == st.session_state.selected_history_index
+            label = f"{'Выбрано: ' if is_selected else ''}{_history_title(item)}"
+            if st.button(label, key=f"show_history_{index}"):
+                st.session_state.selected_history_index = index
 
 
 topic = st.text_input("Тема мозгового штурма", placeholder="Например: запуск MVP за 2 недели")
@@ -290,6 +385,33 @@ topic = st.text_input("Тема мозгового штурма", placeholder="�
 button_cols = st.columns(2)
 run_clicked = button_cols[0].button("Запустить", type="primary")
 debate_clicked = button_cols[1].button("Столкнуть модели")
+
+st.divider()
+st.subheader("Повторный мозговой штурм с контекстом")
+
+selected_history_entry = _selected_history_entry()
+if selected_history_entry:
+    st.caption(f"Выбранный контекст: {_history_title(selected_history_entry)}")
+else:
+    st.caption("История пока пуста. Можно добавить только комментарии и файлы.")
+
+rerun_comments = st.text_area(
+    "Комментарии к повторному запуску",
+    placeholder="Например: сделай решение дешевле, убери лишние интеграции, добавь план на месяц",
+)
+use_selected_context = st.checkbox(
+    "Использовать выбранную запись истории как контекст",
+    value=bool(selected_history_entry),
+    disabled=not selected_history_entry,
+)
+uploaded_context_files = st.file_uploader(
+    "Добавить файлы в контекст",
+    type=["txt", "md", "json", "csv", "py", "yaml", "yml"],
+    accept_multiple_files=True,
+)
+rerun_cols = st.columns(2)
+rerun_fast_clicked = rerun_cols[0].button("Повторить обычный brainstorm")
+rerun_debate_clicked = rerun_cols[1].button("Повторить через столкновение моделей")
 
 st.divider()
 st.subheader("Спросить выбранную модель")
@@ -309,10 +431,10 @@ if synthesis.get("model"):
 
 if not agent_options:
     agent_options = [
-        {"role": "Продуктовый стратег", "model": "openrouter/openai/gpt-4o"},
-        {"role": "Креативный маркетолог", "model": "openrouter/anthropic/claude-3.5-sonnet"},
-        {"role": "Технический архитектор", "model": "openrouter/google/gemini-1.5-pro"},
-        {"role": "Модератор", "model": "openrouter/openai/gpt-4o"},
+        {"role": "Продуктовый стратег", "model": "openrouter/openai/gpt-5.1"},
+        {"role": "Креативный маркетолог", "model": "openrouter/anthropic/claude-sonnet-4.6"},
+        {"role": "Технический архитектор", "model": "openrouter/~google/gemini-pro-latest"},
+        {"role": "Модератор", "model": "openrouter/openai/gpt-5.1"},
     ]
 
 selected_agent_label = st.selectbox(
@@ -398,7 +520,74 @@ if run_clicked or debate_clicked:
                     "data": data,
                 }
             )
+            st.session_state.selected_history_index = len(st.session_state.brainstorm_history) - 1
             if is_debate:
+                _render_debate_result(data)
+            else:
+                _render_result(data)
+elif rerun_fast_clicked or rerun_debate_clicked:
+    selected_context = _history_entry_to_context(selected_history_entry) if use_selected_context else ""
+    files_context = _uploaded_files_context(uploaded_context_files)
+    combined_context = _merge_context_parts(selected_context, files_context)
+    rerun_topic = (topic or "").strip() or (selected_history_entry or {}).get("topic", "").strip()
+
+    if not rerun_topic:
+        st.warning("Введите тему или выберите запись истории для повторного запуска.")
+    else:
+        is_debate_rerun = rerun_debate_clicked
+        request_url = DEBATE_URL if is_debate_rerun else BRAINSTORM_URL
+        mode = "debate_rerun" if is_debate_rerun else "fast_rerun"
+        payload = {
+            "topic": rerun_topic,
+            "context": combined_context,
+            "comments": rerun_comments.strip() or None,
+        }
+        status_title = (
+            "Повторное столкновение моделей запущено..."
+            if is_debate_rerun
+            else "Повторный мозговой штурм запущен..."
+        )
+        status_done = "Повторный запуск завершён"
+        timeout_s = 900 if is_debate_rerun else 300
+
+        try:
+            with st.status(status_title, expanded=True) as status:
+                st.write("Отправляю тему, контекст и комментарии на бэкенд.")
+                logger.info("POST %s payload=%s", request_url, json.dumps(payload, ensure_ascii=False))
+                response = requests.post(
+                    request_url,
+                    json=payload,
+                    headers={"Content-Type": "application/json"},
+                    timeout=timeout_s,
+                )
+                if response.status_code >= 400:
+                    raise requests.HTTPError(_backend_error_message(response), response=response)
+                data = response.json()
+                status.update(label=status_done, state="complete", expanded=False)
+        except requests.HTTPError as exc:
+            logger.exception(
+                "HTTP error from backend: %s status=%s",
+                exc,
+                getattr(exc.response, "status_code", None),
+            )
+            st.error(f"Ошибка бэкенда: {exc}")
+        except requests.RequestException as exc:
+            logger.exception("Request to backend failed: %s", exc)
+            st.error(f"Не удалось связаться с бэкендом: {exc}")
+        except ValueError as exc:
+            logger.exception("Invalid JSON from backend: %s", exc)
+            st.error(f"Некорректный ответ сервера (не JSON): {exc}")
+        else:
+            st.session_state.brainstorm_history.append(
+                {
+                    "created_at": datetime.now().strftime("%H:%M"),
+                    "topic": data.get("topic", rerun_topic),
+                    "mode": mode,
+                    "data": data,
+                }
+            )
+            st.session_state.selected_history_index = len(st.session_state.brainstorm_history) - 1
+            if is_debate_rerun:
                 _render_debate_result(data)
             else:
                 _render_result(data)
@@ -447,6 +636,7 @@ elif ask_clicked:
                     "data": data,
                 }
             )
+            st.session_state.selected_history_index = len(st.session_state.brainstorm_history) - 1
             _render_ask_result(data)
 elif st.session_state.brainstorm_history:
-    _render_history_entry(st.session_state.brainstorm_history[-1])
+    _render_history_entry(_selected_history_entry() or st.session_state.brainstorm_history[-1])
