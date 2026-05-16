@@ -5,6 +5,8 @@ env/
 
 # Игнорируем ключи API
 .env
+.env.*
+!.env.example
 
 # Игнорируем кэш Python
 __pycache__/

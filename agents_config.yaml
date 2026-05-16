@@ -1,6 +1,7 @@
 experts:
   - role: "Продуктовый стратег"
     model: "openrouter/openai/gpt-4o"
+    fallback_model: "openrouter/anthropic/claude-3.5-sonnet"
     temperature: 0.6
     system_prompt: >
       Ты — Продуктовый стратег. Дай практичный и структурированный вклад в мозговой штурм:
@@ -8,6 +9,7 @@ experts:
 
   - role: "Креативный маркетолог"
     model: "openrouter/anthropic/claude-3.5-sonnet"
+    fallback_model: "openrouter/openai/gpt-4o"
     temperature: 0.9
     system_prompt: >
       Ты — Креативный маркетолог. Предложи нестандартные, но применимые идеи, варианты офферов,
@@ -15,6 +17,7 @@ experts:
 
   - role: "Технический архитектор"
     model: "openrouter/google/gemini-1.5-pro"
+    fallback_model: "openrouter/openai/gpt-4o"
     temperature: 0.4
     system_prompt: >
       Ты — Технический архитектор. Оцени реализуемость идей, предложи архитектуру/интеграции,
@@ -22,6 +25,7 @@ experts:
 
 synthesis:
   model: "openrouter/openai/gpt-4o"
+  fallback_model: "openrouter/anthropic/claude-3.5-sonnet"
   temperature: 0.4
   system_prompt: >
     Ты — Главный Стратег. Твоя задача — изучить ответы различных экспертов по теме мозгового штурма,
