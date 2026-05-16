@@ -1,6 +1,7 @@
 """Streamlit UI for AI Brainstorm — calls deployed FastAPI backend."""
 
 from datetime import datetime
+import io
 import json
 import logging
 import os
@@ -22,6 +23,9 @@ BRAINSTORM_URL = f"{BACKEND_URL}/brainstorm"
 DEBATE_URL = f"{BACKEND_URL}/brainstorm/debate"
 ASK_AGENT_URL = f"{BACKEND_URL}/agents/ask"
 HEALTH_URL = f"{BACKEND_URL}/health"
+PDF_OCR_DPI = int(os.getenv("PDF_OCR_DPI", "200"))
+TESSERACT_CMD = os.getenv("TESSERACT_CMD", "").strip()
+SUPPORTED_CONTEXT_FILE_TYPES = ["txt", "md", "json", "csv", "py", "yaml", "yml", "pdf"]
 
 MODEL_DESCRIPTIONS = {
     "openrouter/openai/gpt-5.1": "GPT-5.1 от OpenAI — сильная стратегия, рассуждения и структура.",
@@ -323,14 +327,74 @@ def _last_history_context() -> str:
     return _history_entry_to_context(_selected_history_entry())
 
 
+def _ocr_pdf_page(page, page_number: int) -> str:
+    try:
+        import fitz
+        from PIL import Image
+        import pytesseract
+    except ImportError:
+        return (
+            f"[Страница {page_number}: OCR недоступен. Установите pymupdf, pillow и pytesseract, "
+            "а также системный Tesseract OCR.]"
+        )
+
+    if TESSERACT_CMD:
+        pytesseract.pytesseract.tesseract_cmd = TESSERACT_CMD
+
+    try:
+        zoom = PDF_OCR_DPI / 72
+        pixmap = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
+        image = Image.open(io.BytesIO(pixmap.tobytes("png")))
+        try:
+            return pytesseract.image_to_string(image, lang="rus+eng").strip()
+        except Exception:
+            logger.warning("PDF OCR rus+eng failed page=%s; retrying with eng", page_number)
+            return pytesseract.image_to_string(image, lang="eng").strip()
+    except Exception as exc:
+        logger.exception("PDF OCR failed page=%s: %s", page_number, exc)
+        return f"[Страница {page_number}: OCR не удалось выполнить: {exc}]"
+
+
+def _pdf_to_text(raw: bytes, filename: str) -> str:
+    try:
+        import fitz
+    except ImportError:
+        return "[PDF не прочитан: установите pymupdf из requirements.txt.]"
+
+    try:
+        document = fitz.open(stream=raw, filetype="pdf")
+    except Exception as exc:
+        logger.exception("Failed to open PDF %s: %s", filename, exc)
+        return f"[PDF не прочитан: не удалось открыть файл: {exc}]"
+
+    pages = []
+    for page_index, page in enumerate(document, start=1):
+        text = page.get_text("text").strip()
+        if not text:
+            text = _ocr_pdf_page(page, page_index)
+        pages.append(f"### Страница {page_index}\n\n{text or '_текст не найден_'}")
+
+    return "\n\n".join(pages) or "_PDF пуст_"
+
+
+def _uploaded_file_to_text(uploaded_file) -> str:
+    raw = uploaded_file.getvalue()
+    filename = uploaded_file.name
+    extension = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+
+    if extension == "pdf":
+        return _pdf_to_text(raw, filename)
+
+    return raw.decode("utf-8", errors="replace")
+
+
 def _uploaded_files_context(uploaded_files: list | None) -> str:
     if not uploaded_files:
         return ""
 
     sections = []
     for uploaded_file in uploaded_files:
-        raw = uploaded_file.getvalue()
-        text = raw.decode("utf-8", errors="replace")
+        text = _uploaded_file_to_text(uploaded_file)
         if len(text) > 80000:
             text = f"{text[:80000]}\n\n[Файл обрезан до 80000 символов для контекста.]"
         sections.append(
@@ -393,7 +457,7 @@ with comments_tab:
     )
     initial_context_files = st.file_uploader(
         "Добавить файлы в контекст первого запуска",
-        type=["txt", "md", "json", "csv", "py", "yaml", "yml"],
+        type=SUPPORTED_CONTEXT_FILE_TYPES,
         accept_multiple_files=True,
         key="initial_context_files",
     )
@@ -422,7 +486,7 @@ use_selected_context = st.checkbox(
 )
 uploaded_context_files = st.file_uploader(
     "Добавить файлы в контекст",
-    type=["txt", "md", "json", "csv", "py", "yaml", "yml"],
+    type=SUPPORTED_CONTEXT_FILE_TYPES,
     accept_multiple_files=True,
 )
 rerun_cols = st.columns(2)

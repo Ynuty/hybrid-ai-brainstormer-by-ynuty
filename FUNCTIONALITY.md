@@ -177,6 +177,8 @@ Streamlit UI умеет:
 - показывать ответы в Markdown;
 - хранить историю текущей сессии;
 - использовать последний результат как контекст для вопроса модели;
+- добавлять текстовые файлы и PDF в контекст;
+- читать текстовый слой PDF и выполнять OCR для сканированных PDF при настроенном Tesseract;
 - скачивать результаты в Markdown.
 
 ## Настройки окружения
@@ -198,8 +200,16 @@ AGENTS_CONFIG_PATH=agents_config.yaml
 MODEL_TIMEOUT_S=120
 MODEL_RETRY_ATTEMPTS=2
 MODEL_RETRY_BACKOFF_S=1.5
+TESSERACT_CMD=
+PDF_OCR_DPI=200
 BRAINSTORM_MODEL=openrouter/openai/gpt-5.1
 SYNTHESIS_MODEL=openrouter/openai/gpt-5.1
+```
+
+Для полной читаемости сканированных PDF нужен системный Tesseract OCR. Если `tesseract.exe` не доступен в `PATH`, укажите путь в `TESSERACT_CMD`, например:
+
+```env
+TESSERACT_CMD=C:\Program Files\Tesseract-OCR\tesseract.exe
 ```
 
 ## Запуск
