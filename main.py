@@ -195,6 +195,16 @@ def _debate_synthesis_prompt(system_prompt: str) -> str:
     )
 
 
+def _agent_question_prompt(system_prompt: str) -> str:
+    return (
+        f"{system_prompt}\n\n"
+        "Пользователь задаёт точечный вопрос выбранной модели. Отвечай строго в своей роли "
+        "и используй Markdown. Если вопрос выходит за рамки твоей роли, честно обозначь границу "
+        "и дай максимально полезный ответ в пределах своей экспертизы. Если передан контекст, "
+        "учитывай его, но не пересказывай полностью."
+    )
+
+
 def _public_error(exc: Exception) -> str:
     return f"{exc.__class__.__name__}: модель временно недоступна или вернула ошибку"
 
@@ -275,6 +285,12 @@ async def _startup() -> None:
 
 class BrainstormRequest(BaseModel):
     topic: str
+
+
+class AgentQuestionRequest(BaseModel):
+    role: str
+    question: str
+    context: str | None = None
 
 
 async def _acompletion_with_timeout(**kwargs: Any):
@@ -442,6 +458,32 @@ def _format_responses_for_prompt(responses: list[dict[str, Any]]) -> str:
             f"{body}"
         )
     return "\n\n".join(sections)
+
+
+def find_agent_by_role(role: str) -> AgentSpec | None:
+    normalized_role = role.strip().lower()
+    for agent in _active_agents():
+        if agent.role.strip().lower() == normalized_role:
+            return agent
+    return None
+
+
+def _is_synthesis_role(role: str) -> bool:
+    normalized_role = role.strip().lower()
+    return normalized_role in {
+        "модератор",
+        "финальный синтез",
+        "синтез",
+        "главный стратег",
+    }
+
+
+def _active_synthesis() -> SynthesisSpec:
+    return _SYNTHESIS or SynthesisSpec(
+        model=SYNTHESIS_MODEL,
+        system_prompt=_default_synthesis_prompt(),
+        temperature=0.4,
+    )
 
 
 async def synthesize_results(topic: str, agent_responses: list[Any]) -> str:
@@ -620,6 +662,44 @@ def build_debate_report(
     )
 
 
+async def ask_synthesis(payload: AgentQuestionRequest) -> dict[str, Any]:
+    synthesis = _active_synthesis()
+    context_block = f"\n\nКонтекст:\n{payload.context.strip()}" if payload.context else ""
+    user_prompt = f"Вопрос пользователя:\n{payload.question.strip()}{context_block}"
+
+    try:
+        content, used_model = await _completion_content(
+            model=synthesis.model,
+            temperature=synthesis.temperature,
+            fallback_model=synthesis.fallback_model,
+            log_context="ask_synthesis",
+            messages=[
+                {"role": "system", "content": _agent_question_prompt(synthesis.system_prompt)},
+                {"role": "user", "content": user_prompt},
+            ],
+        )
+        return {
+            "role": "Модератор",
+            "model": used_model,
+            "configured_model": synthesis.model,
+            "question": payload.question.strip(),
+            "response": content,
+            "success": True,
+            "error": None,
+        }
+    except Exception as exc:
+        logger.exception("ask_synthesis failed model=%s: %s", synthesis.model, exc)
+        return {
+            "role": "Модератор",
+            "model": synthesis.model,
+            "configured_model": synthesis.model,
+            "question": payload.question.strip(),
+            "response": "",
+            "success": False,
+            "error": _public_error(exc),
+        }
+
+
 @app.post("/brainstorm")
 async def brainstorm(payload: BrainstormRequest):
     topic = payload.topic.strip()
@@ -710,6 +790,37 @@ async def brainstorm_debate(payload: BrainstormRequest):
             final_synthesis,
         ),
     }
+
+
+@app.post("/agents/ask")
+async def ask_agent(payload: AgentQuestionRequest):
+    role = payload.role.strip()
+    question = payload.question.strip()
+    if not role:
+        logger.warning("ask_agent: empty role rejected")
+        raise HTTPException(status_code=400, detail="Role cannot be empty.")
+    if not question:
+        logger.warning("ask_agent: empty question rejected")
+        raise HTTPException(status_code=400, detail="Question cannot be empty.")
+
+    if _is_synthesis_role(role):
+        return await ask_synthesis(payload)
+
+    agent = find_agent_by_role(role)
+    if agent is None:
+        logger.warning("ask_agent: role not found role=%s", role)
+        raise HTTPException(status_code=404, detail=f"Agent role not found: {role}")
+
+    context_block = f"\n\nКонтекст:\n{payload.context.strip()}" if payload.context else ""
+    user_prompt = f"Вопрос пользователя:\n{question}{context_block}"
+    result = await call_agent_custom(
+        agent,
+        system_prompt=_agent_question_prompt(agent.system_prompt),
+        user_prompt=user_prompt,
+        log_context=f"ask_agent role={agent.role}",
+    )
+    result["question"] = question
+    return result
 
 
 @app.get("/health")

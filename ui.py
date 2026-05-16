@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 BACKEND_URL = os.getenv("BACKEND_URL", "http://127.0.0.1:8000").rstrip("/")
 BRAINSTORM_URL = f"{BACKEND_URL}/brainstorm"
 DEBATE_URL = f"{BACKEND_URL}/brainstorm/debate"
+ASK_AGENT_URL = f"{BACKEND_URL}/agents/ask"
 HEALTH_URL = f"{BACKEND_URL}/health"
 
 MODEL_DESCRIPTIONS = {
@@ -32,12 +33,28 @@ MODEL_DESCRIPTIONS = {
     ),
 }
 
+ROLE_FUNCTIONS = {
+    "Продуктовый стратег": "бизнес-логика, рынок и структура",
+    "Креативный маркетолог": "тексты, виральность и нестандартная подача",
+    "Технический архитектор": "архитектура, инструменты и техническая реализация",
+    "Модератор": "финальный синтез и устранение противоречий",
+}
+
+MODEL_LABELS = {
+    "openrouter/openai/gpt-4o": "GPT-4o",
+    "openrouter/anthropic/claude-3.5-sonnet": "Claude 3.5 Sonnet",
+    "openrouter/google/gemini-1.5-pro": "Gemini 1.5 Pro",
+}
+
 st.set_page_config(page_title="AI Brainstorm", layout="wide")
 st.title("AI Brainstorm")
 st.caption(f"Бэкенд: `{BACKEND_URL}`")
 
 if "brainstorm_history" not in st.session_state:
     st.session_state.brainstorm_history = []
+
+if "health_data" not in st.session_state:
+    st.session_state.health_data = {}
 
 
 def _backend_error_message(response: requests.Response) -> str:
@@ -46,6 +63,20 @@ def _backend_error_message(response: requests.Response) -> str:
     except ValueError:
         return response.text[:1000] or "Бэкенд вернул ошибку без описания."
     return str(data.get("detail") or data)[:1000]
+
+
+def _model_display_name(model: str, role: str = "") -> str:
+    base_name = MODEL_LABELS.get(model, model)
+    if role == "Модератор":
+        return f"{base_name} Модератор"
+    return base_name
+
+
+def _agent_option_label(item: dict) -> str:
+    model = item.get("model", "unknown")
+    role = item.get("role", "")
+    function = ROLE_FUNCTIONS.get(role, role or "универсальная помощь")
+    return f"{_model_display_name(model, role)} · {function}"
 
 
 def _result_to_markdown(data: dict) -> str:
@@ -153,12 +184,84 @@ def _render_debate_result(data: dict) -> None:
         _render_response_list("Доработанные ответы", data.get("revised_responses") or [])
 
 
+def _ask_result_to_markdown(data: dict) -> str:
+    return "\n\n".join(
+        [
+            f"# Ответ модели: {data.get('role', 'Модель')}",
+            f"**Модель:** `{data.get('model', 'unknown')}`",
+            f"## Вопрос\n{data.get('question', '')}",
+            f"## Ответ\n{data.get('response', '') or data.get('error') or '_пусто_'}",
+        ]
+    )
+
+
+def _render_ask_result(data: dict) -> None:
+    st.subheader(f"Ответ: {data.get('role', 'Модель')}")
+    st.caption(f"Модель: `{data.get('model', 'unknown')}`")
+    if data.get("success"):
+        st.markdown(data.get("response", "") or "_пусто_")
+    else:
+        st.error(data.get("error") or "Модель не ответила.")
+
+    st.download_button(
+        "Скачать ответ в Markdown",
+        data=_ask_result_to_markdown(data),
+        file_name="agent_answer.md",
+        mime="text/markdown",
+        key="download_ask_answer",
+    )
+
+
+def _last_history_context() -> str:
+    if not st.session_state.brainstorm_history:
+        return ""
+
+    entry = st.session_state.brainstorm_history[-1]
+    data = entry.get("data") or {}
+    mode = entry.get("mode")
+
+    if mode == "debate":
+        return "\n\n".join(
+            [
+                f"# Контекст последнего спора моделей: {data.get('topic', '')}",
+                "## Финальный синтез",
+                data.get("final_synthesis") or "_пусто_",
+            ]
+        )
+
+    if mode == "ask_agent":
+        return "\n\n".join(
+            [
+                f"# Контекст предыдущего вопроса к модели: {data.get('role', '')}",
+                f"## Вопрос\n{data.get('question', '')}",
+                f"## Ответ\n{data.get('response', '') or data.get('error') or '_пусто_'}",
+            ]
+        )
+
+    expert_sections = []
+    for item in data.get("agent_responses") or []:
+        expert_sections.append(
+            f"## {item.get('role', 'Эксперт')}\n"
+            f"{item.get('response', '') or item.get('error') or '_пусто_'}"
+        )
+    return "\n\n".join(
+        [
+            f"# Контекст последнего brainstorm: {data.get('topic', '')}",
+            "## Ответы экспертов",
+            "\n\n".join(expert_sections),
+            "## Итоговый синтез",
+            data.get("final_synthesis") or "_пусто_",
+        ]
+    )
+
+
 with st.sidebar:
     st.header("Состояние")
     try:
         health = requests.get(HEALTH_URL, timeout=5)
         health.raise_for_status()
         health_data = health.json()
+        st.session_state.health_data = health_data
         st.success("Бэкенд доступен")
         st.caption(f"Экспертов из YAML: {health_data.get('agents_from_yaml', 0)}")
         for agent in health_data.get("agents") or []:
@@ -173,7 +276,12 @@ with st.sidebar:
     if not st.session_state.brainstorm_history:
         st.caption("Запросов пока нет.")
     for item in reversed(st.session_state.brainstorm_history[-5:]):
-        mode_label = "спор" if item.get("mode") == "debate" else "быстрый"
+        if item.get("mode") == "debate":
+            mode_label = "спор"
+        elif item.get("mode") == "ask_agent":
+            mode_label = "вопрос"
+        else:
+            mode_label = "быстрый"
         st.caption(f"{item['created_at']} · {mode_label} · {item['topic']}")
 
 
@@ -183,11 +291,57 @@ button_cols = st.columns(2)
 run_clicked = button_cols[0].button("Запустить", type="primary")
 debate_clicked = button_cols[1].button("Столкнуть модели")
 
+st.divider()
+st.subheader("Спросить выбранную модель")
+
+health_data = st.session_state.health_data or {}
+agent_options = [
+    {
+        "role": agent.get("role", ""),
+        "model": agent.get("model", "unknown"),
+    }
+    for agent in health_data.get("agents", [])
+    if agent.get("role")
+]
+synthesis = health_data.get("synthesis") or {}
+if synthesis.get("model"):
+    agent_options.append({"role": "Модератор", "model": synthesis.get("model", "unknown")})
+
+if not agent_options:
+    agent_options = [
+        {"role": "Продуктовый стратег", "model": "openrouter/openai/gpt-4o"},
+        {"role": "Креативный маркетолог", "model": "openrouter/anthropic/claude-3.5-sonnet"},
+        {"role": "Технический архитектор", "model": "openrouter/google/gemini-1.5-pro"},
+        {"role": "Модератор", "model": "openrouter/openai/gpt-4o"},
+    ]
+
+selected_agent_label = st.selectbox(
+    "Выберите модель",
+    options=[_agent_option_label(item) for item in agent_options],
+)
+selected_agent = agent_options[
+    [_agent_option_label(item) for item in agent_options].index(selected_agent_label)
+]
+st.caption(f"Внутренняя роль: {selected_agent['role']} · `{selected_agent['model']}`")
+agent_question = st.text_area(
+    "Ваш вопрос",
+    placeholder="Например: распиши техническую реализацию backend-части подробнее",
+)
+use_last_context = st.checkbox(
+    "Использовать последний результат как контекст",
+    value=bool(st.session_state.brainstorm_history),
+    disabled=not st.session_state.brainstorm_history,
+)
+ask_clicked = st.button("Спросить выбранную модель")
+
 
 def _render_history_entry(entry: dict) -> None:
     if entry.get("mode") == "debate":
         st.info("Показан последний debate-результат из истории текущей сессии.")
         _render_debate_result(entry["data"])
+    elif entry.get("mode") == "ask_agent":
+        st.info("Показан последний ответ выбранной модели из истории текущей сессии.")
+        _render_ask_result(entry["data"])
     else:
         st.info("Показан последний быстрый результат из истории текущей сессии.")
         _render_result(entry["data"])
@@ -248,5 +402,51 @@ if run_clicked or debate_clicked:
                 _render_debate_result(data)
             else:
                 _render_result(data)
+elif ask_clicked:
+    if not agent_question or not agent_question.strip():
+        st.warning("Введите вопрос для выбранной модели.")
+    else:
+        payload = {
+            "role": selected_agent["role"],
+            "question": agent_question.strip(),
+            "context": _last_history_context() if use_last_context else None,
+        }
+        try:
+            with st.status("Отправляю вопрос выбранной модели...", expanded=True) as status:
+                logger.info("POST %s payload=%s", ASK_AGENT_URL, json.dumps(payload, ensure_ascii=False))
+                response = requests.post(
+                    ASK_AGENT_URL,
+                    json=payload,
+                    headers={"Content-Type": "application/json"},
+                    timeout=300,
+                )
+                st.write(f"Ожидаю ответ: {selected_agent['role']} · {selected_agent['model']}")
+                if response.status_code >= 400:
+                    raise requests.HTTPError(_backend_error_message(response), response=response)
+                data = response.json()
+                status.update(label="Ответ выбранной модели готов", state="complete", expanded=False)
+        except requests.HTTPError as exc:
+            logger.exception(
+                "HTTP error from backend: %s status=%s",
+                exc,
+                getattr(exc.response, "status_code", None),
+            )
+            st.error(f"Ошибка бэкенда: {exc}")
+        except requests.RequestException as exc:
+            logger.exception("Request to backend failed: %s", exc)
+            st.error(f"Не удалось связаться с бэкендом: {exc}")
+        except ValueError as exc:
+            logger.exception("Invalid JSON from backend: %s", exc)
+            st.error(f"Некорректный ответ сервера (не JSON): {exc}")
+        else:
+            st.session_state.brainstorm_history.append(
+                {
+                    "created_at": datetime.now().strftime("%H:%M"),
+                    "topic": data.get("question", ""),
+                    "mode": "ask_agent",
+                    "data": data,
+                }
+            )
+            _render_ask_result(data)
 elif st.session_state.brainstorm_history:
     _render_history_entry(st.session_state.brainstorm_history[-1])
