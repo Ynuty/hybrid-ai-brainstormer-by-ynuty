@@ -9,6 +9,7 @@ import time
 
 import requests
 import streamlit as st
+import tiktoken
 from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).resolve().parent / ".env.main")
@@ -87,12 +88,103 @@ DEFAULT_SUPPORTED_CONTEXT_FILE_TYPES = [
     "webm",
 ]
 
+TEXT_TOKEN_ESTIMATE_EXTENSIONS = {
+    "txt",
+    "md",
+    "markdown",
+    "json",
+    "csv",
+    "py",
+    "yaml",
+    "yml",
+    "xml",
+    "html",
+    "htm",
+    "log",
+    "srt",
+    "vtt",
+}
+BYTES_PER_TOKEN_ESTIMATE = 4
+TOKEN_BUDGET_NOTICE_THRESHOLD = 20_000
+TOKEN_BUDGET_WARNING_THRESHOLD = 80_000
+
 
 def _supported_file_types() -> list[str]:
     types = (st.session_state.get("health_data") or {}).get("supported_context_types")
     if types:
         return types
     return DEFAULT_SUPPORTED_CONTEXT_FILE_TYPES
+
+
+@st.cache_resource
+def _token_encoder():
+    return tiktoken.get_encoding("cl100k_base")
+
+
+def _count_text_tokens(text: str) -> int:
+    if not text:
+        return 0
+    try:
+        return len(_token_encoder().encode(text))
+    except Exception as exc:
+        logger.warning("tiktoken estimate failed; using char fallback: %s", exc)
+        return max(1, len(text) // BYTES_PER_TOKEN_ESTIMATE)
+
+
+def _uploaded_file_token_estimate(uploaded_file) -> tuple[int, str]:
+    raw = uploaded_file.getvalue()
+    suffix = Path(uploaded_file.name).suffix.lstrip(".").lower()
+    if suffix in TEXT_TOKEN_ESTIMATE_EXTENSIONS:
+        text = raw.decode("utf-8", errors="replace")
+        return _count_text_tokens(text), "text"
+    return max(1, len(raw) // BYTES_PER_TOKEN_ESTIMATE), "bytes"
+
+
+def _prompt_token_estimate(topic_text: str, comments_text: str, uploaded_files: list | None) -> dict:
+    topic_tokens = _count_text_tokens(topic_text)
+    comments_tokens = _count_text_tokens(comments_text)
+    file_tokens = 0
+    binary_files = 0
+    file_count = len(uploaded_files or [])
+    for uploaded_file in uploaded_files or []:
+        tokens, source = _uploaded_file_token_estimate(uploaded_file)
+        file_tokens += tokens
+        if source == "bytes":
+            binary_files += 1
+    total_tokens = topic_tokens + comments_tokens + file_tokens
+    return {
+        "topic_tokens": topic_tokens,
+        "comments_tokens": comments_tokens,
+        "file_tokens": file_tokens,
+        "file_count": file_count,
+        "binary_files": binary_files,
+        "total_tokens": total_tokens,
+    }
+
+
+def _render_prompt_token_info(estimate: dict) -> None:
+    total = estimate["total_tokens"]
+    file_count = estimate["file_count"]
+    binary_files = estimate["binary_files"]
+    suffix = ""
+    if binary_files:
+        suffix = (
+            f" {binary_files} бинарн. файл(ов) оценены по размеру; "
+            "после извлечения текста реальное число токенов может отличаться."
+        )
+    level = "нормальный"
+    if total >= TOKEN_BUDGET_WARNING_THRESHOLD:
+        level = "очень большой"
+    elif total >= TOKEN_BUDGET_NOTICE_THRESHOLD:
+        level = "крупный"
+    st.info(
+        "Оценка промпта перед отправкой: "
+        f"~{total:,} токенов ({level}). "
+        f"Тема: ~{estimate['topic_tokens']:,}, "
+        f"комментарии: ~{estimate['comments_tokens']:,}, "
+        f"файлы ({file_count}): ~{estimate['file_tokens']:,}."
+        f"{suffix}".replace(",", " ")
+    )
 
 st.set_page_config(page_title="AI Brainstorm", layout="wide")
 st.title("AI Brainstorm")
@@ -106,6 +198,9 @@ if "health_data" not in st.session_state:
 
 if "selected_history_index" not in st.session_state:
     st.session_state.selected_history_index = None
+
+if "interactive_debate_job" not in st.session_state:
+    st.session_state.interactive_debate_job = None
 
 
 def _backend_error_message(response: requests.Response) -> str:
@@ -121,6 +216,53 @@ def _post_json(url: str, payload: dict, *, timeout: int = 60) -> dict:
     if response.status_code >= 400:
         raise requests.HTTPError(_backend_error_message(response), response=response)
     return response.json()
+
+
+def _post_brainstorm_stream(payload: dict) -> dict:
+    final_data: dict | None = None
+
+    def _events():
+        nonlocal final_data
+        event_name = "message"
+        data_lines: list[str] = []
+        with requests.post(
+            BRAINSTORM_URL,
+            json=payload,
+            headers={**JSON_HEADERS, "Accept": "text/event-stream"},
+            timeout=300,
+            stream=True,
+        ) as response:
+            if response.status_code >= 400:
+                raise requests.HTTPError(_backend_error_message(response), response=response)
+            for raw_line in response.iter_lines(decode_unicode=True):
+                line = raw_line or ""
+                if line.startswith("event:"):
+                    event_name = line.removeprefix("event:").strip()
+                    continue
+                if line.startswith("data:"):
+                    data_lines.append(line.removeprefix("data:").strip())
+                    continue
+                if line == "" and data_lines:
+                    payload_text = "\n".join(data_lines)
+                    data_lines = []
+                    try:
+                        event_payload = json.loads(payload_text)
+                    except json.JSONDecodeError as exc:
+                        raise RuntimeError(f"Некорректный SSE payload: {exc}") from exc
+
+                    current_event = event_payload.get("event") or event_name
+                    event_name = "message"
+                    if current_event == "chunk":
+                        yield event_payload.get("text", "")
+                    elif current_event == "final":
+                        final_data = event_payload.get("result") or {}
+                    elif current_event == "error":
+                        raise RuntimeError(event_payload.get("detail") or "Streaming error")
+
+    st.write_stream(_events())
+    if not final_data:
+        raise RuntimeError("Бэкенд завершил stream без финального результата.")
+    return final_data
 
 
 def _get_json(url: str, *, timeout: int = 30) -> dict:
@@ -176,6 +318,15 @@ def _poll_debate_job(job_id: str, status) -> dict:
                 raise RuntimeError("Задача завершена, но результат пуст.")
             progress_bar.progress(1.0)
             return result
+        if job_status == "waiting_for_user":
+            progress_caption.caption("Интерактивный спор ждёт вашу критику.")
+            status.write("Первичный раунд готов. Добавьте комментарий, чтобы продолжить.")
+            return {
+                "waiting_for_user": True,
+                "job_id": job_id,
+                "topic": job_data.get("topic"),
+                "partial": job_data.get("partial") or {},
+            }
         if job_status == "failed":
             raise RuntimeError(job_data.get("error") or "Спор моделей завершился с ошибкой.")
         time.sleep(JOB_POLL_INTERVAL_S)
@@ -191,6 +342,8 @@ def _run_debate_with_job(payload: dict, status, *, rerun: bool = False) -> tuple
         raise RuntimeError("Бэкенд не вернул job_id для спора моделей.")
     status.write(f"Задача создана: `{job_id}`")
     result = _poll_debate_job(job_id, status)
+    if result.get("waiting_for_user"):
+        return result, "debate_interactive_waiting"
     history_mode = _debate_history_mode(result.get("debate_mode", payload.get("debate_mode", "full")), rerun=rerun)
     return result, history_mode
 
@@ -207,6 +360,8 @@ def _history_mode_label(mode: str | None) -> str:
         "debate": "спор",
         "debate_full": "полный спор",
         "debate_light": "быстрый спор",
+        "debate_interactive": "интерактивный спор",
+        "debate_interactive_waiting": "интерактивный спор (пауза)",
         "ask_agent": "вопрос",
         "fast_rerun": "повтор",
         "debate_rerun": "повтор спора",
@@ -633,6 +788,9 @@ with comments_tab:
         help="PDF, Office, изображения (OCR), аудио (транскрипт), EPUB и др.",
     )
 
+initial_prompt_estimate = _prompt_token_estimate(topic, initial_comments, initial_context_files)
+_render_prompt_token_info(initial_prompt_estimate)
+
 button_cols = st.columns(2)
 run_clicked = button_cols[0].button("Запустить", type="primary")
 debate_clicked = button_cols[1].button("Столкнуть модели")
@@ -648,6 +806,55 @@ selected_debate_label = st.radio(
 )
 selected_debate_mode = debate_mode_keys[debate_mode_labels.index(selected_debate_label)]
 st.caption(DEBATE_MODE_OPTIONS[selected_debate_mode][1])
+interactive_debate = st.checkbox(
+    "Интерактивный спор: остановиться после первого круга и дать мой комментарий",
+    value=False,
+    help="Работает как полный спор: после первичных ответов job перейдёт в waiting_for_user.",
+)
+if interactive_debate and selected_debate_mode != "full":
+    st.info("Интерактивный спор использует полный режим, чтобы был раунд доработки.")
+
+if st.session_state.interactive_debate_job:
+    pending = st.session_state.interactive_debate_job
+    st.info(f"Интерактивный спор ждёт комментарий: `{pending.get('job_id')}`")
+    partial = pending.get("partial") or {}
+    with st.expander("Первичные ответы экспертов", expanded=True):
+        for item in partial.get("initial_responses") or []:
+            st.markdown(f"### {item.get('role', 'Эксперт')}")
+            st.markdown(item.get("response") or item.get("error") or "_пусто_")
+    user_debate_comment = st.text_area(
+        "Ваша критика / уточнения для раунда доработки",
+        key="interactive_debate_comment",
+        placeholder="Например: учтите бюджет, уберите сложные интеграции, добавьте риски по срокам...",
+    )
+    continue_interactive_clicked = st.button("Продолжить спор с моим комментарием")
+    if continue_interactive_clicked:
+        if not user_debate_comment.strip():
+            st.warning("Введите комментарий для продолжения спора.")
+        else:
+            try:
+                with st.status("Продолжаю интерактивный спор...", expanded=True) as status:
+                    _post_json(
+                        f"{BACKEND_URL}/jobs/{pending['job_id']}/continue",
+                        {"comment": user_debate_comment.strip()},
+                        timeout=60,
+                    )
+                    data = _poll_debate_job(pending["job_id"], status)
+                    status.update(label="Интерактивный спор завершён", state="complete", expanded=False)
+                st.session_state.interactive_debate_job = None
+                st.session_state.brainstorm_history.append(
+                    {
+                        "created_at": datetime.now().strftime("%H:%M"),
+                        "topic": data.get("topic", ""),
+                        "mode": "debate_interactive",
+                        "data": data,
+                    }
+                )
+                st.session_state.selected_history_index = len(st.session_state.brainstorm_history) - 1
+                _render_debate_result(data)
+            except (requests.HTTPError, requests.RequestException, ValueError, TimeoutError, RuntimeError) as exc:
+                logger.exception("Interactive debate continuation failed: %s", exc)
+                st.error(str(exc))
 
 st.divider()
 st.subheader("Повторный мозговой штурм с контекстом")
@@ -762,14 +969,14 @@ if run_clicked or debate_clicked:
         try:
             with st.status(status_title, expanded=True) as status:
                 if is_debate:
-                    payload["debate_mode"] = selected_debate_mode
+                    payload["debate_mode"] = "full" if interactive_debate else selected_debate_mode
+                    payload["interactive_debate"] = bool(interactive_debate)
                     data, mode = _run_debate_with_job(payload, status)
                 else:
                     st.write("Отправляю тему на бэкенд.")
                     logger.info("POST %s topic=%s", BRAINSTORM_URL, payload.get("topic"))
-                    data = _post_json(BRAINSTORM_URL, payload, timeout=300)
+                    data = _post_brainstorm_stream(payload)
                     mode = "fast"
-                    st.write("Получаю ответы экспертов и итоговый синтез.")
                 status.update(label=status_done, state="complete", expanded=False)
         except requests.HTTPError as exc:
             logger.exception(
@@ -785,6 +992,10 @@ if run_clicked or debate_clicked:
             logger.exception("Debate/brainstorm failed: %s", exc)
             st.error(str(exc))
         else:
+            if data.get("waiting_for_user"):
+                st.session_state.interactive_debate_job = data
+                st.info("Первичный раунд завершён. Введите критику в блоке интерактивного спора.")
+                st.stop()
             st.session_state.brainstorm_history.append(
                 {
                     "created_at": datetime.now().strftime("%H:%M"),
@@ -827,12 +1038,13 @@ elif rerun_fast_clicked or rerun_debate_clicked:
         try:
             with st.status(status_title, expanded=True) as status:
                 if is_debate_rerun:
-                    payload["debate_mode"] = selected_debate_mode
+                    payload["debate_mode"] = "full" if interactive_debate else selected_debate_mode
+                    payload["interactive_debate"] = bool(interactive_debate)
                     data, mode = _run_debate_with_job(payload, status, rerun=True)
                 else:
                     st.write("Отправляю тему, контекст и комментарии на бэкенд.")
                     logger.info("POST %s topic=%s", BRAINSTORM_URL, payload.get("topic"))
-                    data = _post_json(BRAINSTORM_URL, payload, timeout=300)
+                    data = _post_brainstorm_stream(payload)
                     mode = "fast_rerun"
                 status.update(label=status_done, state="complete", expanded=False)
         except requests.HTTPError as exc:
@@ -849,6 +1061,10 @@ elif rerun_fast_clicked or rerun_debate_clicked:
             logger.exception("Rerun failed: %s", exc)
             st.error(str(exc))
         else:
+            if data.get("waiting_for_user"):
+                st.session_state.interactive_debate_job = data
+                st.info("Первичный раунд завершён. Введите критику в блоке интерактивного спора.")
+                st.stop()
             st.session_state.brainstorm_history.append(
                 {
                     "created_at": datetime.now().strftime("%H:%M"),

@@ -1,5 +1,0 @@
-# Минимум для Streamlit UI (Streamlit Cloud / только фронт).
-# API с источниками контекста крутится отдельно: pip install -r requirements.txt
-streamlit>=1.32,<2
-requests>=2.31,<3
-python-dotenv>=1.0,<2

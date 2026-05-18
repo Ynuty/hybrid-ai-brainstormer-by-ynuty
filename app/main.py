@@ -13,10 +13,10 @@ from slowapi.util import get_remote_address
 import jobs
 from app.agents import find_agent_by_role, is_synthesis_role, load_agents_yaml
 from app.auth import verify_api_key
-from app.brainstorm import run_brainstorm
+from app.brainstorm import run_brainstorm, stream_brainstorm_events
 from app.config import get_settings
 from app.debate import execute_debate
-from app.jobs_runner import run_brainstorm_job, run_debate_job
+from app.jobs_runner import continue_interactive_debate_job, run_brainstorm_job, run_debate_job
 from app.sources.audio_transcribe import transcribe_audio_bytes
 from app.sources.file_extract import (
     extract_text_from_bytes,
@@ -39,10 +39,12 @@ from app.schemas import (
     ContextSourceItem,
     DebateResponse,
     HealthResponse,
+    JobContinueRequest,
     JobStartResponse,
 )
 from app.services import ask_synthesis, call_agent_custom
 from app.prompts import agent_question_prompt
+from app.rag import relevant_context_for_prompt
 from app.state import (
     active_agents,
     active_synthesis,
@@ -137,8 +139,39 @@ async def health():
     )
 
 
-@app.post("/brainstorm", response_model=BrainstormResponse, dependencies=[Depends(verify_api_key)])
+def _sse(payload: dict) -> str:
+    event = payload.get("event", "message")
+    data = json.dumps(payload, ensure_ascii=False)
+    return f"event: {event}\ndata: {data}\n\n"
+
+
+@app.post("/brainstorm", dependencies=[Depends(verify_api_key)])
 async def brainstorm(payload: BrainstormRequest):
+    _require_llm_ready()
+    topic = payload.topic.strip()
+    if not topic:
+        raise HTTPException(status_code=400, detail="Topic cannot be empty.")
+
+    async def event_generator():
+        try:
+            async for event in stream_brainstorm_events(payload):
+                yield _sse(event)
+        except RuntimeError as exc:
+            yield _sse({"event": "error", "detail": str(exc)})
+        except Exception as exc:
+            logger.exception("brainstorm stream failed: %s", exc)
+            yield _sse(
+                {
+                    "event": "error",
+                    "detail": "Не удалось получить итоговый синтез. Попробуйте повторить запрос позже.",
+                }
+            )
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+@app.post("/brainstorm/sync", response_model=BrainstormResponse, dependencies=[Depends(verify_api_key)])
+async def brainstorm_sync(payload: BrainstormRequest):
     _require_llm_ready()
     topic = payload.topic.strip()
     if not topic:
@@ -181,6 +214,7 @@ async def start_debate_job(payload: BrainstormRequest):
         job_type="debate",
         topic=topic,
         debate_mode=payload.debate_mode,
+        request_payload=payload.model_dump(),
     )
     asyncio.create_task(run_debate_job(job.job_id, payload))
     return JobStartResponse(
@@ -217,6 +251,17 @@ async def get_job_status(job_id: str):
     return job.to_public_dict(include_result=True)
 
 
+@app.post("/jobs/{job_id}/continue", dependencies=[Depends(verify_api_key)])
+async def continue_job(job_id: str, payload: JobContinueRequest):
+    job = await jobs.get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    if job.status != JobStatus.WAITING_FOR_USER:
+        raise HTTPException(status_code=409, detail=f"Job is not waiting for user: {job.status.value}")
+    asyncio.create_task(continue_interactive_debate_job(job_id, payload.comment))
+    return {"job_id": job_id, "status": JobStatus.RUNNING.value, "poll_url": f"/jobs/{job_id}"}
+
+
 @app.get("/jobs/{job_id}/events", dependencies=[Depends(verify_api_key)])
 async def stream_job_events(job_id: str):
     async def event_generator():
@@ -230,7 +275,7 @@ async def stream_job_events(job_id: str):
             if payload != last_payload:
                 yield f"data: {payload}\n\n"
                 last_payload = payload
-            if job.status in (JobStatus.DONE, JobStatus.FAILED):
+            if job.status in (JobStatus.DONE, JobStatus.FAILED, JobStatus.WAITING_FOR_USER):
                 break
             await asyncio.sleep(1)
 
@@ -257,7 +302,8 @@ async def ask_agent(payload: AgentQuestionRequest):
     from app.context_utils import truncate_for_prompt
 
     settings = get_settings()
-    context = truncate_for_prompt(payload.context, settings.max_context_chars)
+    context = relevant_context_for_prompt(query=question, context=payload.context, settings=settings)
+    context = truncate_for_prompt(context, settings.max_context_chars)
     context_block = f"\n\nКонтекст:\n{context}" if context else ""
     user_prompt = f"Вопрос пользователя:\n{question}{context_block}"
     result = await call_agent_custom(

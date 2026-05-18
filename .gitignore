@@ -11,3 +11,7 @@ env/
 # Игнорируем кэш Python
 __pycache__/
 *.pyc
+
+# Локальная SQLite база фоновых задач
+jobs.db
+jobs.db-*

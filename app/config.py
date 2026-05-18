@@ -50,6 +50,13 @@ class Settings(BaseSettings):
     whisper_model: str = "whisper-1"
     whisper_local_model: str = "base"
 
+    enable_context_rag: bool = True
+    rag_min_context_chars: int = 12_000
+    rag_chunk_size: int = 1_200
+    rag_chunk_overlap: int = 150
+    rag_top_k: int = 8
+    rag_embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
+
     tesseract_path: str = ""
     pdf_ocr_dpi: int = 200
 

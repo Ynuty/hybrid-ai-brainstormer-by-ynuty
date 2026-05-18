@@ -1,6 +1,7 @@
 from collections.abc import Awaitable, Callable
 from typing import Any, Literal
 
+from app.rag import relevant_context_for_prompt
 from app.schemas import BrainstormRequest
 from app.services import (
     format_responses_for_prompt,
@@ -68,23 +69,27 @@ async def execute_debate_full(
     on_partial: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
 ) -> dict[str, Any]:
     topic = payload.topic.strip()
+    context = relevant_context_for_prompt(
+        query=f"{topic}\n{payload.comments or ''}",
+        context=payload.context,
+    )
     stage_total = 4
 
     await report_progress(on_progress, "initial", 1, stage_total, "Эксперты дают первичные ответы")
-    initial_responses = await run_initial_expert_round(topic, payload.context, payload.comments)
+    initial_responses = await run_initial_expert_round(topic, context, payload.comments)
     require_any_success(initial_responses, "initial")
     if on_partial:
         await on_partial({"initial_responses": initial_responses})
 
     await report_progress(on_progress, "critique", 2, stage_total, "Эксперты критикуют ответы друг друга")
-    critiques = await run_debate_round(topic, initial_responses, payload.context, payload.comments)
+    critiques = await run_debate_round(topic, initial_responses, context, payload.comments)
     require_any_success(critiques, "critique")
     if on_partial:
         await on_partial({"initial_responses": initial_responses, "critiques": critiques})
 
     await report_progress(on_progress, "revision", 3, stage_total, "Эксперты дорабатывают свои ответы")
     revised_responses = await run_revision_round(
-        topic, initial_responses, critiques, payload.context, payload.comments
+        topic, initial_responses, critiques, context, payload.comments
     )
     require_any_success(revised_responses, "revision")
     if on_partial:
@@ -98,7 +103,7 @@ async def execute_debate_full(
 
     await report_progress(on_progress, "synthesis", 4, stage_total, "Модератор собирает итог")
     final_synthesis = await synthesize_debate_results(
-        topic, revised_responses, critiques, payload.context, payload.comments
+        topic, revised_responses, critiques, context, payload.comments
     )
 
     return {
@@ -122,16 +127,20 @@ async def execute_debate_light(
     on_partial: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
 ) -> dict[str, Any]:
     topic = payload.topic.strip()
+    context = relevant_context_for_prompt(
+        query=f"{topic}\n{payload.comments or ''}",
+        context=payload.context,
+    )
     stage_total = 3
 
     await report_progress(on_progress, "initial", 1, stage_total, "Эксперты дают первичные ответы")
-    initial_responses = await run_initial_expert_round(topic, payload.context, payload.comments)
+    initial_responses = await run_initial_expert_round(topic, context, payload.comments)
     require_any_success(initial_responses, "initial")
     if on_partial:
         await on_partial({"initial_responses": initial_responses})
 
     await report_progress(on_progress, "critique", 2, stage_total, "Эксперты критикуют ответы друг друга")
-    critiques = await run_debate_round(topic, initial_responses, payload.context, payload.comments)
+    critiques = await run_debate_round(topic, initial_responses, context, payload.comments)
     require_any_success(critiques, "critique")
     if on_partial:
         await on_partial({"initial_responses": initial_responses, "critiques": critiques})
@@ -140,7 +149,7 @@ async def execute_debate_light(
         on_progress, "synthesis", 3, stage_total, "Модератор собирает итог без доработки"
     )
     final_synthesis = await synthesize_debate_results_light(
-        topic, initial_responses, critiques, payload.context, payload.comments
+        topic, initial_responses, critiques, context, payload.comments
     )
 
     return {

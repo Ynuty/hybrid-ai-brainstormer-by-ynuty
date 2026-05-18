@@ -19,6 +19,10 @@ class BrainstormRequest(BaseModel):
         default="full",
         description="full: все раунды спора; light: без доработки экспертов",
     )
+    interactive_debate: bool = Field(
+        default=False,
+        description="Pause debate after first expert round and wait for user critique.",
+    )
 
 
 class AgentQuestionRequest(BaseModel):
@@ -65,6 +69,10 @@ class JobStartResponse(BaseModel):
     status: str
     debate_mode: DebateMode | None = None
     poll_url: str
+
+
+class JobContinueRequest(BaseModel):
+    comment: str = Field(..., min_length=1, max_length=10000)
 
 
 class HealthAgent(BaseModel):
