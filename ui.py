@@ -6,6 +6,7 @@ import logging
 import os
 from pathlib import Path
 import time
+import uuid
 
 import requests
 import streamlit as st
@@ -451,7 +452,7 @@ def _render_result(data: dict) -> None:
         data=markdown_export,
         file_name="brainstorm.md",
         mime="text/markdown",
-        key="download_fast_result",
+        key=f"download_fast_result_{uuid.uuid4().hex}",
     )
 
 
@@ -498,21 +499,21 @@ def _render_debate_result(data: dict) -> None:
         data=_debate_final_to_markdown(data),
         file_name="final_solution.md",
         mime="text/markdown",
-        key="download_debate_final",
+        key=f"download_debate_final_{uuid.uuid4().hex}",
     )
     download_cols[1].download_button(
         "Скачать ход дискуссии",
         data=debate_report,
         file_name="model_debate_discussion.md",
         mime="text/markdown",
-        key="download_debate_discussion",
+        key=f"download_debate_discussion_{uuid.uuid4().hex}",
     )
     download_cols[2].download_button(
         "Скачать всё вместе",
         data=_debate_all_to_markdown(data),
         file_name="debate_full_result.md",
         mime="text/markdown",
-        key="download_debate_all",
+        key=f"download_debate_all_{uuid.uuid4().hex}",
     )
 
     with st.expander("Итоговое решение", expanded=True):
@@ -549,7 +550,7 @@ def _render_ask_result(data: dict) -> None:
         data=_ask_result_to_markdown(data),
         file_name="agent_answer.md",
         mime="text/markdown",
-        key="download_ask_answer",
+        key=f"download_ask_answer_{uuid.uuid4().hex}",
     )
 
 
@@ -730,7 +731,7 @@ with st.sidebar:
         data=export_payload,
         file_name="brainstorm_history.json",
         mime="application/json",
-        key="export_history",
+        key=f"export_history_{uuid.uuid4().hex}",
     )
     imported = st.file_uploader("Импорт истории", type=["json"], key="import_history")
     if imported is not None:
