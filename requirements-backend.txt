@@ -28,4 +28,3 @@ python-multipart>=0.0.9,<1
 slowapi>=0.1.9,<1
 faiss-cpu>=1.8,<2
 langchain-text-splitters>=0.3,<1
-sentence-transformers>=3.0,<4

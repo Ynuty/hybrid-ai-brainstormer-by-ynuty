@@ -252,24 +252,34 @@ def _image_to_text(raw: bytes, filename: str) -> str:
 
 
 def _pdf_to_text(raw: bytes, filename: str) -> str:
+    return "\n\n".join(iter_pdf_text_chunks(raw, filename)) or "_PDF пуст_"
+
+
+def iter_pdf_text_chunks(raw: bytes, filename: str):
+    """Yield PDF page text one page at a time.
+
+    Large-file RAG code can consume this generator directly and embed/index page
+    chunks without materialising the whole report as one Python string.
+    """
+
     try:
         import fitz
     except ImportError:
-        return "[PDF не прочитан: установите pymupdf.]"
+        yield "[PDF не прочитан: установите pymupdf.]"
+        return
 
     try:
         document = fitz.open(stream=raw, filetype="pdf")
     except Exception as exc:
         logger.exception("Failed to open PDF %s: %s", filename, exc)
-        return f"[PDF не прочитан: {exc}]"
+        yield f"[PDF не прочитан: {exc}]"
+        return
 
-    pages = []
     for page_index, page in enumerate(document, start=1):
         text = page.get_text("text").strip()
         if not text:
             text = _ocr_pdf_page(page, page_index)
-        pages.append(f"### Страница {page_index}\n\n{text or '_текст не найден_'}")
-    return "\n\n".join(pages) or "_PDF пуст_"
+        yield f"### Страница {page_index}\n\n{text or '_текст не найден_'}"
 
 
 def _ocr_pdf_page(page, page_number: int) -> str:

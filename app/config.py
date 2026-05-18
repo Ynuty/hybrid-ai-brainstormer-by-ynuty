@@ -55,7 +55,8 @@ class Settings(BaseSettings):
     rag_chunk_size: int = 1_200
     rag_chunk_overlap: int = 150
     rag_top_k: int = 8
-    rag_embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
+    rag_embedding_model: str = "openrouter/openai/text-embedding-3-small"
+    rag_embedding_batch_size: int = 32
 
     tesseract_path: str = ""
     pdf_ocr_dpi: int = 200

@@ -333,7 +333,7 @@ Streamlit UI умеет:
 
 Контекст можно собрать из файлов и внешних источников. Это не полный клон NotebookLM: в проекте пока нет цитирования по чанкам и Audio Overview. Сейчас источники конвертируются в Markdown-context для brainstorm/debate.
 
-Для больших context backend включает локальный RAG: текст режется на чанки (`langchain-text-splitters`), векторизуется (`sentence-transformers`) и ищется через FAISS (`faiss-cpu`). В промпт отправляются только top-K релевантных фрагментов по теме. Если RAG-зависимости недоступны, backend безопасно возвращается к обычной обрезке контекста.
+Для больших context backend включает cloud-embedding RAG: текст режется на чанки (`langchain-text-splitters`), эмбеддинги создаются через LiteLLM + OpenRouter (`openrouter/openai/text-embedding-3-small`) с ключом `OPENROUTER_API_KEY`, а поиск идёт локально через FAISS (`faiss-cpu`). В промпт отправляются только top-K релевантных фрагментов по теме. Локальные ML-модели (`sentence-transformers`, PyTorch/torch) не используются, чтобы Render 512MB не падал по OOM.
 
 ### Файлы
 
@@ -414,7 +414,8 @@ RAG_MIN_CONTEXT_CHARS=12000
 RAG_CHUNK_SIZE=1200
 RAG_CHUNK_OVERLAP=150
 RAG_TOP_K=8
-RAG_EMBEDDING_MODEL=sentence-transformers/all-MiniLM-L6-v2
+RAG_EMBEDDING_MODEL=openrouter/openai/text-embedding-3-small
+RAG_EMBEDDING_BATCH_SIZE=32
 JOB_TTL_HOURS=24
 DEBATE_JOB_MAX_SECONDS=1800
 TESSERACT_PATH="C:\Program Files\Tesseract-OCR\tesseract.exe"
@@ -443,7 +444,7 @@ TESSERACT_PATH="C:\Program Files\Tesseract-OCR\tesseract.exe"
 | Тесты | `pip install -r requirements-dev.txt` |
 | Локальная транскрипция аудио (опционально) | `pip install -r requirements-audio.txt` |
 
-**Ошибка «Error installing requirements» на Streamlit Cloud:** теперь `requirements.txt` специально лёгкий и подходит для Cloud. Тяжёлые зависимости (`litellm`, `pymupdf`, `trafilatura`, `faiss-cpu`, `sentence-transformers` и др.) находятся в `requirements-backend.txt`. Бэкенд поднимайте на Render/Railway/Docker с `requirements-backend.txt`.
+**Ошибка «Error installing requirements» на Streamlit Cloud:** теперь `requirements.txt` специально лёгкий и подходит для Cloud. Тяжёлые backend-зависимости (`litellm`, `pymupdf`, `trafilatura`, `faiss-cpu` и др.) находятся в `requirements-backend.txt`. Бэкенд поднимайте на Render/Railway/Docker с `requirements-backend.txt`.
 
 **Локально в VS Code:** если запускаете весь проект (API + UI), выберите интерпретатор `.venv`, затем `pip install -r requirements-backend.txt`. Не используйте `requirements-audio.txt`, если не нужен offline Whisper (~сотни МБ).
 

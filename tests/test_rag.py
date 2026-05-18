@@ -17,5 +17,12 @@ def test_rag_can_be_disabled():
 
 
 def test_simple_split_uses_overlap():
-    chunks = _simple_split("abcdefghij", chunk_size=4, overlap=2)
+    chunks = list(_simple_split("abcdefghij", chunk_size=4, overlap=2))
     assert chunks[:3] == ["abcd", "cdef", "efgh"]
+
+
+def test_rag_module_does_not_import_local_ml():
+    import app.rag as rag
+
+    source_names = set(rag.__dict__)
+    assert "SentenceTransformer" not in source_names
