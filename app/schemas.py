@@ -75,6 +75,30 @@ class HealthAgent(BaseModel):
     description: str
 
 
+class ContextSourceItem(BaseModel):
+    kind: str
+    ref: str
+    text: str
+    warning: str | None = None
+
+
+class ContextImportRequest(BaseModel):
+    urls: list[str] = Field(default_factory=list, max_length=20)
+    youtube_urls: list[str] = Field(default_factory=list, max_length=20)
+
+
+class ContextImportResponse(BaseModel):
+    sources: list[ContextSourceItem]
+    combined_text: str
+
+
+class ContextExtractResponse(BaseModel):
+    filename: str
+    text: str
+    kind: str = "file"
+    warning: str | None = None
+
+
 class HealthResponse(BaseModel):
     status: str
     agents_from_yaml: int
@@ -84,3 +108,5 @@ class HealthResponse(BaseModel):
     llm_max_concurrent: int
     debate_modes: dict[str, Any]
     readiness_message: str | None = None
+    supported_context_types: list[str] = Field(default_factory=list)
+    context_features: dict[str, Any] = Field(default_factory=dict)

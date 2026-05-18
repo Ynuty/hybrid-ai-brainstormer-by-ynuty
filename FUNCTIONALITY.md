@@ -137,7 +137,35 @@ Response: `{ "job_id", "status", "debate_mode", "poll_url" }`.
 
 ### `POST /context/extract`
 
-Загрузка файла (PDF/txt) → текст для контекста (OCR на backend).
+Загрузка файла → текст для контекста. Поддерживаются форматы, близкие к NotebookLM:
+
+- документы: PDF (OCR), DOCX, RTF, ODT, EPUB, TXT/MD, HTML;
+- презентации: PPTX/PPT;
+- таблицы: XLSX/XLS, CSV, JSON;
+- изображения: PNG/JPG/WebP и др. (OCR);
+- аудио: MP3/WAV/M4A/OGG/FLAC/WebM (транскрипт Whisper, cloud или local).
+
+Лимиты: `MAX_UPLOAD_MB`, для аудио — `MAX_AUDIO_UPLOAD_MB`, итог обрезается `MAX_CONTEXT_CHARS`.
+
+### `POST /context/import`
+
+Импорт внешних источников без файла:
+
+```json
+{
+  "urls": ["https://example.com/article"],
+  "youtube_urls": ["https://www.youtube.com/watch?v=..."]
+}
+```
+
+Response: `{ "sources": [{ "kind", "ref", "text", "warning" }], "combined_text" }`.
+
+- URL: httpx + trafilatura/BeautifulSoup, защита от SSRF;
+- YouTube: субтитры через `youtube-transcript-api` (опционально yt-dlp).
+
+Переменные: `ENABLE_URL_IMPORT`, `ENABLE_YOUTUBE_IMPORT`, `ENABLE_AUDIO_TRANSCRIBE`, `URL_FETCH_*`, `AUDIO_TRANSCRIBE_MODE`, `WHISPER_MODEL`.
+
+`GET /health` возвращает `supported_context_types` и `context_features` для UI.
 
 ### `POST /brainstorm/jobs`
 
@@ -190,7 +218,9 @@ Streamlit UI умеет:
 - показывать ответы в Markdown;
 - хранить историю текущей сессии;
 - использовать последний результат как контекст для вопроса модели;
-- добавлять файлы в контекст через backend `/context/extract`;
+- добавлять файлы в контекст через `/context/extract` (документы, OCR, аудио);
+- импортировать URL и YouTube через `/context/import` (блок «Источники (NotebookLM)»);
+- получать список поддерживаемых типов из `/health` → `supported_context_types`;
 - выбирать режим спора: полный или быстрый;
 - экспортировать/импортировать историю сессии (JSON);
 - скачивать результаты в Markdown.

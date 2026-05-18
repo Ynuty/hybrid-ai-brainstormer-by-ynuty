@@ -11,3 +11,5 @@ def test_health_endpoint():
         assert "status" in data
         assert "agents" in data
         assert data["agents_from_yaml"] == 3
+        assert "pdf" in data.get("supported_context_types", [])
+        assert "url_import" in data.get("context_features", {})

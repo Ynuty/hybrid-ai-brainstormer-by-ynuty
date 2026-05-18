@@ -34,6 +34,7 @@ DEBATE_URL = f"{BACKEND_URL}/brainstorm/debate"
 ASK_AGENT_URL = f"{BACKEND_URL}/agents/ask"
 HEALTH_URL = f"{BACKEND_URL}/health"
 EXTRACT_URL = f"{BACKEND_URL}/context/extract"
+IMPORT_URL = f"{BACKEND_URL}/context/import"
 API_SECRET = os.getenv("API_SECRET", "").strip()
 API_HEADERS = {"X-API-Key": API_SECRET} if API_SECRET else {}
 JSON_HEADERS = {**API_HEADERS, "Content-Type": "application/json"}
@@ -52,21 +53,46 @@ DEBATE_MODE_OPTIONS = {
         "Первичные ответы → критика → доработка каждого эксперта → итог модератора.",
     ),
 }
-SUPPORTED_CONTEXT_FILE_TYPES = [
+DEFAULT_SUPPORTED_CONTEXT_FILE_TYPES = [
     "pdf",
     "pptx",
     "ppt",
     "xlsx",
     "xlsm",
     "xls",
+    "docx",
+    "rtf",
+    "odt",
+    "epub",
+    "doc",
     "json",
     "csv",
     "txt",
     "md",
+    "html",
+    "htm",
     "yaml",
     "yml",
     "xml",
+    "png",
+    "jpg",
+    "jpeg",
+    "webp",
+    "gif",
+    "mp3",
+    "wav",
+    "m4a",
+    "ogg",
+    "flac",
+    "webm",
 ]
+
+
+def _supported_file_types() -> list[str]:
+    types = (st.session_state.get("health_data") or {}).get("supported_context_types")
+    if types:
+        return types
+    return DEFAULT_SUPPORTED_CONTEXT_FILE_TYPES
 
 st.set_page_config(page_title="AI Brainstorm", layout="wide")
 st.title("AI Brainstorm")
@@ -466,6 +492,46 @@ def _uploaded_files_context(uploaded_files: list | None) -> str:
     return "\n\n".join(["# Контекст из загруженных файлов", *sections])
 
 
+def _import_remote_via_backend(urls_text: str, youtube_text: str) -> str:
+    urls = [line.strip() for line in (urls_text or "").splitlines() if line.strip()]
+    youtube_urls = [line.strip() for line in (youtube_text or "").splitlines() if line.strip()]
+    if not urls and not youtube_urls:
+        return ""
+
+    try:
+        response = requests.post(
+            IMPORT_URL,
+            json={"urls": urls, "youtube_urls": youtube_urls},
+            headers=JSON_HEADERS,
+            timeout=180,
+        )
+        if response.status_code < 400:
+            data = response.json()
+            for source in data.get("sources") or []:
+                warning = source.get("warning")
+                if warning:
+                    st.warning(f"{source.get('ref')}: {warning}")
+            return data.get("combined_text", "") or ""
+        st.warning(f"Импорт URL/YouTube: {_backend_error_message(response)}")
+    except requests.RequestException as exc:
+        logger.warning("Backend import failed: %s", exc)
+        st.warning(f"Не удалось импортировать URL/YouTube: {exc}")
+    return ""
+
+
+def _build_sources_context(
+    uploaded_files: list | None,
+    urls_text: str = "",
+    youtube_text: str = "",
+) -> str:
+    parts = [
+        _uploaded_files_context(uploaded_files),
+        _import_remote_via_backend(urls_text, youtube_text),
+    ]
+    merged = _merge_context_parts(*parts)
+    return merged or ""
+
+
 def _merge_context_parts(*parts: str) -> str | None:
     context = "\n\n".join([part for part in parts if part and part.strip()])
     return context or None
@@ -547,12 +613,24 @@ with comments_tab:
             "B2B-аудиторию и быстрые тесты спроса"
         ),
     )
+    with st.expander("Источники (NotebookLM)", expanded=False):
+        st.caption("Сайты, YouTube и файлы ниже — в контекст первого запуска.")
+        initial_context_urls = st.text_area(
+            "Ссылки на статьи / сайты (по одной на строку)",
+            key="initial_context_urls",
+            placeholder="https://example.com/article",
+        )
+        initial_context_youtube = st.text_area(
+            "YouTube-ссылки (по одной на строку)",
+            key="initial_context_youtube",
+            placeholder="https://www.youtube.com/watch?v=...",
+        )
     initial_context_files = st.file_uploader(
         "Добавить файлы в контекст первого запуска",
-        type=SUPPORTED_CONTEXT_FILE_TYPES,
+        type=_supported_file_types(),
         accept_multiple_files=True,
         key="initial_context_files",
-        help="PDF, PowerPoint (pptx), Excel (xlsx/xls), JSON, CSV и текстовые файлы.",
+        help="PDF, Office, изображения (OCR), аудио (транскрипт), EPUB и др.",
     )
 
 button_cols = st.columns(2)
@@ -589,11 +667,22 @@ use_selected_context = st.checkbox(
     value=bool(selected_history_entry),
     disabled=not selected_history_entry,
 )
+with st.expander("Источники (NotebookLM) для повтора", expanded=False):
+    rerun_context_urls = st.text_area(
+        "Ссылки на статьи / сайты",
+        key="rerun_context_urls",
+        placeholder="https://example.com/article",
+    )
+    rerun_context_youtube = st.text_area(
+        "YouTube-ссылки",
+        key="rerun_context_youtube",
+        placeholder="https://www.youtube.com/watch?v=...",
+    )
 uploaded_context_files = st.file_uploader(
     "Добавить файлы в контекст",
-    type=SUPPORTED_CONTEXT_FILE_TYPES,
+    type=_supported_file_types(),
     accept_multiple_files=True,
-    help="Файлы обрабатываются на backend: PDF/OCR, pptx, Excel, JSON и др.",
+    help="Backend: документы, OCR, аудио-транскрипт, таблицы и др.",
 )
 rerun_cols = st.columns(2)
 rerun_fast_clicked = rerun_cols[0].button("Повторить обычный brainstorm")
@@ -657,10 +746,14 @@ if run_clicked or debate_clicked:
     if not topic or not topic.strip():
         st.warning("Введите тему.")
     else:
-        initial_files_context = _uploaded_files_context(initial_context_files)
+        initial_sources_context = _build_sources_context(
+            initial_context_files,
+            st.session_state.get("initial_context_urls", ""),
+            st.session_state.get("initial_context_youtube", ""),
+        )
         payload = {
             "topic": topic.strip(),
-            "context": initial_files_context or None,
+            "context": initial_sources_context or None,
             "comments": initial_comments.strip() or None,
         }
         is_debate = debate_clicked
@@ -707,8 +800,12 @@ if run_clicked or debate_clicked:
                 _render_result(data)
 elif rerun_fast_clicked or rerun_debate_clicked:
     selected_context = _history_entry_to_context(selected_history_entry) if use_selected_context else ""
-    files_context = _uploaded_files_context(uploaded_context_files)
-    combined_context = _merge_context_parts(selected_context, files_context)
+    sources_context = _build_sources_context(
+        uploaded_context_files,
+        st.session_state.get("rerun_context_urls", ""),
+        st.session_state.get("rerun_context_youtube", ""),
+    )
+    combined_context = _merge_context_parts(selected_context, sources_context)
     rerun_topic = (topic or "").strip() or (selected_history_entry or {}).get("topic", "").strip()
 
     if not rerun_topic:

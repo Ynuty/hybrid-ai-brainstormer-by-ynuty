@@ -34,9 +34,21 @@ class Settings(BaseSettings):
     max_context_chars: int = 80000
     max_comments_chars: int = 10000
     max_upload_mb: int = 25
+    max_audio_upload_mb: int = 50
 
     api_secret: str = ""
     rate_limit_per_minute: int = 30
+
+    enable_url_import: bool = True
+    enable_youtube_import: bool = True
+    enable_audio_transcribe: bool = True
+    url_fetch_timeout_s: float = 15.0
+    url_fetch_max_bytes: int = 5_000_000
+    url_fetch_allowed_hosts: str = ""
+    youtube_use_ytdlp: bool = False
+    audio_transcribe_mode: str = "cloud"
+    whisper_model: str = "whisper-1"
+    whisper_local_model: str = "base"
 
     tesseract_path: str = ""
     pdf_ocr_dpi: int = 200

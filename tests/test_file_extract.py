@@ -10,7 +10,29 @@ def test_is_supported_filename():
     assert is_supported_filename("report.pdf")
     assert is_supported_filename("slides.PPTX")
     assert is_supported_filename("data.xlsx")
+    assert is_supported_filename("notes.docx")
+    assert is_supported_filename("voice.mp3")
     assert not is_supported_filename("archive.zip")
+
+
+def test_html_extract_strips_tags():
+    raw = b"<html><body><h1>Title</h1><script>ignore()</script><p>Body</p></body></html>"
+    text = extract_text_from_bytes(raw, "page.html")
+    assert "Title" in text
+    assert "Body" in text
+    assert "ignore()" not in text
+
+
+def test_docx_extract():
+    pytest.importorskip("docx")
+    from docx import Document
+
+    document = Document()
+    document.add_paragraph("Hello DOCX")
+    buffer = io.BytesIO()
+    document.save(buffer)
+    text = extract_text_from_bytes(buffer.getvalue(), "notes.docx")
+    assert "Hello DOCX" in text
 
 
 def test_json_extract_pretty():

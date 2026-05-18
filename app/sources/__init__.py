@@ -1,4 +1,4 @@
-"""Backward-compatible re-export. Prefer app.sources.file_extract."""
+"""Context source extraction (NotebookLM-style)."""
 
 from app.sources.file_extract import (
     AUDIO_EXTENSIONS,
