@@ -1,6 +1,8 @@
 experts:
   - role: "Продуктовый стратег"
     model: "openrouter/openai/gpt-5.1"
+    display_name: "GPT-5.1"
+    description: "бизнес-логика, рынок и структура"
     temperature: 0.6
     system_prompt: >
       Ты — Продуктовый стратег на базе GPT-5.1 от OpenAI.
@@ -11,6 +13,8 @@ experts:
 
   - role: "Креативный маркетолог"
     model: "openrouter/anthropic/claude-sonnet-4.6"
+    display_name: "Claude Sonnet 4.6"
+    description: "тексты, виральность и нестандартная подача"
     temperature: 0.9
     system_prompt: >
       Ты — Креативный маркетолог на базе Claude Sonnet 4.6 от Anthropic.
@@ -21,6 +25,8 @@ experts:
 
   - role: "Технический архитектор"
     model: "openrouter/~google/gemini-pro-latest"
+    display_name: "Gemini Pro Latest"
+    description: "архитектура, инструменты и техническая реализация"
     temperature: 0.4
     system_prompt: >
       Ты — Технический архитектор на базе Gemini Pro от Google.
@@ -31,6 +37,8 @@ experts:
 
 synthesis:
   model: "openrouter/openai/gpt-5.1"
+  display_name: "GPT-5.1 Модератор"
+  description: "финальный синтез и устранение противоречий"
   temperature: 0.4
   system_prompt: >
     Ты — Модератор финального синтеза на базе GPT-5.1 от OpenAI.

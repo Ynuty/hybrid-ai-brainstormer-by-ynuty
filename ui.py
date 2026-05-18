@@ -1,16 +1,17 @@
 """Streamlit UI for AI Brainstorm — calls deployed FastAPI backend."""
 
 from datetime import datetime
-import io
 import json
 import logging
 import os
+from pathlib import Path
+import time
 
 import requests
 import streamlit as st
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(Path(__file__).resolve().parent / ".env.main")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -18,37 +19,54 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except ValueError:
+        logger.warning("%s must be an integer; using %d", name, default)
+        return default
+
+
 BACKEND_URL = os.getenv("BACKEND_URL", "http://127.0.0.1:8000").rstrip("/")
 BRAINSTORM_URL = f"{BACKEND_URL}/brainstorm"
 DEBATE_URL = f"{BACKEND_URL}/brainstorm/debate"
 ASK_AGENT_URL = f"{BACKEND_URL}/agents/ask"
 HEALTH_URL = f"{BACKEND_URL}/health"
-PDF_OCR_DPI = int(os.getenv("PDF_OCR_DPI", "200"))
-TESSERACT_CMD = os.getenv("TESSERACT_CMD", "").strip()
-SUPPORTED_CONTEXT_FILE_TYPES = ["txt", "md", "json", "csv", "py", "yaml", "yml", "pdf"]
+EXTRACT_URL = f"{BACKEND_URL}/context/extract"
+API_SECRET = os.getenv("API_SECRET", "").strip()
+API_HEADERS = {"X-API-Key": API_SECRET} if API_SECRET else {}
+JSON_HEADERS = {**API_HEADERS, "Content-Type": "application/json"}
+JOB_POLL_INTERVAL_S = 2
+JOB_POLL_TIMEOUT_S = 1800
 
-MODEL_DESCRIPTIONS = {
-    "openrouter/openai/gpt-5.1": "GPT-5.1 от OpenAI — сильная стратегия, рассуждения и структура.",
-    "openrouter/anthropic/claude-sonnet-4.6": (
-        "Claude Sonnet 4.6 от Anthropic — тексты, виральность, подача и нестандартный подход."
+DEBATE_MODE_OPTIONS = {
+    "light": (
+        "Быстрый спор",
+        "3 этапа · ~7 вызовов LLM · дешевле и быстрее. "
+        "Первичные ответы → критика → итог модератора (без доработки экспертов).",
     ),
-    "openrouter/~google/gemini-pro-latest": (
-        "Gemini Pro Latest от Google — архитектура, инструменты и техническая реализация."
+    "full": (
+        "Полный спор",
+        "4 этапа · ~10 вызовов LLM · максимум качества. "
+        "Первичные ответы → критика → доработка каждого эксперта → итог модератора.",
     ),
 }
-
-ROLE_FUNCTIONS = {
-    "Продуктовый стратег": "бизнес-логика, рынок и структура",
-    "Креативный маркетолог": "тексты, виральность и нестандартная подача",
-    "Технический архитектор": "архитектура, инструменты и техническая реализация",
-    "Модератор": "финальный синтез и устранение противоречий",
-}
-
-MODEL_LABELS = {
-    "openrouter/openai/gpt-5.1": "GPT-5.1",
-    "openrouter/anthropic/claude-sonnet-4.6": "Claude Sonnet 4.6",
-    "openrouter/~google/gemini-pro-latest": "Gemini Pro Latest",
-}
+SUPPORTED_CONTEXT_FILE_TYPES = [
+    "pdf",
+    "pptx",
+    "ppt",
+    "xlsx",
+    "xlsm",
+    "xls",
+    "json",
+    "csv",
+    "txt",
+    "md",
+    "yaml",
+    "yml",
+    "xml",
+]
 
 st.set_page_config(page_title="AI Brainstorm", layout="wide")
 st.title("AI Brainstorm")
@@ -72,27 +90,102 @@ def _backend_error_message(response: requests.Response) -> str:
     return str(data.get("detail") or data)[:1000]
 
 
-def _model_display_name(model: str, role: str = "") -> str:
-    base_name = MODEL_LABELS.get(model, model)
-    if role == "Модератор":
-        return f"{base_name} Модератор"
-    return base_name
+def _post_json(url: str, payload: dict, *, timeout: int = 60) -> dict:
+    response = requests.post(url, json=payload, headers=JSON_HEADERS, timeout=timeout)
+    if response.status_code >= 400:
+        raise requests.HTTPError(_backend_error_message(response), response=response)
+    return response.json()
+
+
+def _get_json(url: str, *, timeout: int = 30) -> dict:
+    response = requests.get(url, headers=API_HEADERS, timeout=timeout)
+    if response.status_code >= 400:
+        raise requests.HTTPError(_backend_error_message(response), response=response)
+    return response.json()
+
+
+def _handle_api_errors(action):
+    try:
+        return action()
+    except requests.HTTPError as exc:
+        logger.exception("HTTP error: %s", exc)
+        st.error(f"Ошибка бэкенда: {exc}")
+    except requests.RequestException as exc:
+        logger.exception("Request failed: %s", exc)
+        st.error(f"Не удалось связаться с бэкендом: {exc}")
+    except (ValueError, TimeoutError, RuntimeError) as exc:
+        logger.exception("Operation failed: %s", exc)
+        st.error(str(exc))
+    return None
+
+
+def _debate_history_mode(debate_mode: str, *, rerun: bool = False) -> str:
+    suffix = "_rerun" if rerun else ""
+    if debate_mode == "light":
+        return f"debate_light{suffix}"
+    return f"debate_full{suffix}"
+
+
+def _poll_debate_job(job_id: str, status) -> dict:
+    job_url = f"{BACKEND_URL}/jobs/{job_id}"
+    deadline = time.time() + JOB_POLL_TIMEOUT_S
+    progress_bar = st.progress(0.0)
+    progress_caption = st.empty()
+
+    while time.time() < deadline:
+        job_data = _get_json(job_url, timeout=30)
+        job_status = job_data.get("status")
+        progress = job_data.get("progress") or {}
+        stage_index = progress.get("stage_index") or 0
+        stage_total = progress.get("stage_total") or 1
+        message = progress.get("message") or "Выполняется..."
+        if stage_total > 0:
+            progress_bar.progress(min(stage_index / stage_total, 1.0))
+        progress_caption.caption(f"Этап {stage_index}/{stage_total}: {message}")
+        status.write(message)
+
+        if job_status == "done":
+            result = job_data.get("result")
+            if not result:
+                raise RuntimeError("Задача завершена, но результат пуст.")
+            progress_bar.progress(1.0)
+            return result
+        if job_status == "failed":
+            raise RuntimeError(job_data.get("error") or "Спор моделей завершился с ошибкой.")
+        time.sleep(JOB_POLL_INTERVAL_S)
+
+    raise TimeoutError("Превышено время ожидания спора моделей. Проверьте бэкенд или повторите позже.")
+
+
+def _run_debate_with_job(payload: dict, status, *, rerun: bool = False) -> tuple[dict, str]:
+    logger.info("POST %s debate_mode=%s", DEBATE_URL, payload.get("debate_mode"))
+    start_data = _post_json(DEBATE_URL, payload, timeout=60)
+    job_id = start_data.get("job_id")
+    if not job_id:
+        raise RuntimeError("Бэкенд не вернул job_id для спора моделей.")
+    status.write(f"Задача создана: `{job_id}`")
+    result = _poll_debate_job(job_id, status)
+    history_mode = _debate_history_mode(result.get("debate_mode", payload.get("debate_mode", "full")), rerun=rerun)
+    return result, history_mode
 
 
 def _agent_option_label(item: dict) -> str:
-    model = item.get("model", "unknown")
-    role = item.get("role", "")
-    function = ROLE_FUNCTIONS.get(role, role or "универсальная помощь")
-    return f"{_model_display_name(model, role)} · {function}"
+    display = item.get("display_name") or item.get("role", "Модель")
+    description = item.get("description") or item.get("role", "")
+    return f"{display} · {description}"
 
 
 def _history_mode_label(mode: str | None) -> str:
     labels = {
         "fast": "быстрый",
         "debate": "спор",
+        "debate_full": "полный спор",
+        "debate_light": "быстрый спор",
         "ask_agent": "вопрос",
         "fast_rerun": "повтор",
         "debate_rerun": "повтор спора",
+        "debate_full_rerun": "повтор полного спора",
+        "debate_light_rerun": "повтор быстрого спора",
     }
     return labels.get(mode or "", "быстрый")
 
@@ -143,11 +236,16 @@ def _render_result(data: dict) -> None:
     metric_cols[1].metric("Готово", success_count)
     metric_cols[2].metric("Ошибок", failed_count)
 
+    if data.get("partial"):
+        st.warning("Частичный результат: не все эксперты ответили успешно.")
+        for failed in data.get("failed_agents") or []:
+            st.caption(f"— {failed.get('role')}: {failed.get('error')}")
+
     st.subheader("Ответы всех AI-моделей")
     for item in agent_responses:
         configured_model = item.get("configured_model") or item.get("model", "unknown")
         used_model = item.get("model", "unknown")
-        model_note = MODEL_DESCRIPTIONS.get(configured_model, configured_model)
+        model_note = configured_model
         status = "готов" if item.get("success") else "ошибка"
 
         st.markdown(f"### {item.get('role', 'Эксперт')}")
@@ -209,6 +307,9 @@ def _debate_all_to_markdown(data: dict) -> str:
 
 
 def _render_debate_result(data: dict) -> None:
+    debate_mode = data.get("debate_mode", "full")
+    mode_label = DEBATE_MODE_OPTIONS.get(debate_mode, DEBATE_MODE_OPTIONS["full"])[0]
+    st.caption(f"Режим спора: **{mode_label}** — {DEBATE_MODE_OPTIONS.get(debate_mode, ('', ''))[1]}")
     debate_report = data.get("debate_report", "") or "_журнал спора пуст_"
     download_cols = st.columns(3)
     download_cols[0].download_button(
@@ -288,7 +389,7 @@ def _history_entry_to_context(entry: dict | None) -> str:
     data = entry.get("data") or {}
     mode = entry.get("mode")
 
-    if mode == "debate":
+    if (mode or "").startswith("debate"):
         return "\n\n".join(
             [
                 f"# Контекст последнего спора моделей: {data.get('topic', '')}",
@@ -327,65 +428,23 @@ def _last_history_context() -> str:
     return _history_entry_to_context(_selected_history_entry())
 
 
-def _ocr_pdf_page(page, page_number: int) -> str:
+def _extract_file_via_backend(uploaded_file) -> str:
     try:
-        import fitz
-        from PIL import Image
-        import pytesseract
-    except ImportError:
-        return (
-            f"[Страница {page_number}: OCR недоступен. Установите pymupdf, pillow и pytesseract, "
-            "а также системный Tesseract OCR.]"
+        response = requests.post(
+            EXTRACT_URL,
+            files={"file": (uploaded_file.name, uploaded_file.getvalue())},
+            headers=API_HEADERS,
+            timeout=120,
         )
-
-    if TESSERACT_CMD:
-        pytesseract.pytesseract.tesseract_cmd = TESSERACT_CMD
-
-    try:
-        zoom = PDF_OCR_DPI / 72
-        pixmap = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
-        image = Image.open(io.BytesIO(pixmap.tobytes("png")))
-        try:
-            return pytesseract.image_to_string(image, lang="rus+eng").strip()
-        except Exception:
-            logger.warning("PDF OCR rus+eng failed page=%s; retrying with eng", page_number)
-            return pytesseract.image_to_string(image, lang="eng").strip()
-    except Exception as exc:
-        logger.exception("PDF OCR failed page=%s: %s", page_number, exc)
-        return f"[Страница {page_number}: OCR не удалось выполнить: {exc}]"
+        if response.status_code < 400:
+            return response.json().get("text", "") or "_файл пуст_"
+    except requests.RequestException as exc:
+        logger.warning("Backend extract failed for %s: %s", uploaded_file.name, exc)
+    return _uploaded_file_to_text_local(uploaded_file)
 
 
-def _pdf_to_text(raw: bytes, filename: str) -> str:
-    try:
-        import fitz
-    except ImportError:
-        return "[PDF не прочитан: установите pymupdf из requirements.txt.]"
-
-    try:
-        document = fitz.open(stream=raw, filetype="pdf")
-    except Exception as exc:
-        logger.exception("Failed to open PDF %s: %s", filename, exc)
-        return f"[PDF не прочитан: не удалось открыть файл: {exc}]"
-
-    pages = []
-    for page_index, page in enumerate(document, start=1):
-        text = page.get_text("text").strip()
-        if not text:
-            text = _ocr_pdf_page(page, page_index)
-        pages.append(f"### Страница {page_index}\n\n{text or '_текст не найден_'}")
-
-    return "\n\n".join(pages) or "_PDF пуст_"
-
-
-def _uploaded_file_to_text(uploaded_file) -> str:
-    raw = uploaded_file.getvalue()
-    filename = uploaded_file.name
-    extension = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
-
-    if extension == "pdf":
-        return _pdf_to_text(raw, filename)
-
-    return raw.decode("utf-8", errors="replace")
+def _uploaded_file_to_text_local(uploaded_file) -> str:
+    return uploaded_file.getvalue().decode("utf-8", errors="replace")
 
 
 def _uploaded_files_context(uploaded_files: list | None) -> str:
@@ -394,9 +453,7 @@ def _uploaded_files_context(uploaded_files: list | None) -> str:
 
     sections = []
     for uploaded_file in uploaded_files:
-        text = _uploaded_file_to_text(uploaded_file)
-        if len(text) > 80000:
-            text = f"{text[:80000]}\n\n[Файл обрезан до 80000 символов для контекста.]"
+        text = _extract_file_via_backend(uploaded_file)
         sections.append(
             "\n\n".join(
                 [
@@ -417,21 +474,56 @@ def _merge_context_parts(*parts: str) -> str | None:
 with st.sidebar:
     st.header("Состояние")
     try:
-        health = requests.get(HEALTH_URL, timeout=5)
+        health = requests.get(HEALTH_URL, headers=API_HEADERS, timeout=5)
         health.raise_for_status()
         health_data = health.json()
         st.session_state.health_data = health_data
-        st.success("Бэкенд доступен")
+        if health_data.get("status") == "degraded":
+            st.warning("Бэкенд degraded")
+            st.caption(health_data.get("readiness_message") or "Проверьте ключи в .env.main")
+        else:
+            st.success("Бэкенд доступен")
         st.caption(f"Экспертов из YAML: {health_data.get('agents_from_yaml', 0)}")
         for agent in health_data.get("agents") or []:
-            st.caption(f"{agent.get('role')}: `{agent.get('model')}`")
+            label = agent.get("display_name") or agent.get("role")
+            st.caption(f"{label}: `{agent.get('model')}`")
         synthesis = health_data.get("synthesis") or {}
         if synthesis.get("model"):
-            st.caption(f"Модератор: `{synthesis.get('model')}`")
+            mod_label = synthesis.get("display_name") or "Модератор"
+            st.caption(f"{mod_label}: `{synthesis.get('model')}`")
+        openrouter = health_data.get("openrouter") or {}
+        if openrouter.get("required") and not openrouter.get("api_key_configured"):
+            st.warning("Добавьте OPENROUTER_API_KEY в .env.main")
     except requests.RequestException:
-        st.warning("Бэкенд пока недоступен")
+        st.warning("Бэкенд недоступен. Запустите API: python main.py")
+        st.session_state.health_data = {}
 
     st.header("История")
+    export_payload = json.dumps(
+        {"schema_version": 1, "entries": st.session_state.brainstorm_history},
+        ensure_ascii=False,
+        indent=2,
+    )
+    st.download_button(
+        "Экспорт истории",
+        data=export_payload,
+        file_name="brainstorm_history.json",
+        mime="application/json",
+        key="export_history",
+    )
+    imported = st.file_uploader("Импорт истории", type=["json"], key="import_history")
+    if imported is not None:
+        try:
+            imported_data = json.loads(imported.getvalue().decode("utf-8"))
+            if imported_data.get("schema_version") == 1:
+                st.session_state.brainstorm_history = imported_data.get("entries") or []
+                st.success(f"Импортировано записей: {len(st.session_state.brainstorm_history)}")
+            else:
+                st.error("Неподдерживаемый формат истории.")
+        except (ValueError, json.JSONDecodeError) as exc:
+            st.error(f"Не удалось прочитать JSON: {exc}")
+
+    st.header("Записи")
     if not st.session_state.brainstorm_history:
         st.caption("Запросов пока нет.")
     else:
@@ -460,11 +552,24 @@ with comments_tab:
         type=SUPPORTED_CONTEXT_FILE_TYPES,
         accept_multiple_files=True,
         key="initial_context_files",
+        help="PDF, PowerPoint (pptx), Excel (xlsx/xls), JSON, CSV и текстовые файлы.",
     )
 
 button_cols = st.columns(2)
 run_clicked = button_cols[0].button("Запустить", type="primary")
 debate_clicked = button_cols[1].button("Столкнуть модели")
+
+st.subheader("Режим спора моделей")
+debate_mode_labels = [DEBATE_MODE_OPTIONS[key][0] for key in DEBATE_MODE_OPTIONS]
+debate_mode_keys = list(DEBATE_MODE_OPTIONS.keys())
+selected_debate_label = st.radio(
+    "Как запускать столкновение моделей",
+    options=debate_mode_labels,
+    index=debate_mode_labels.index(DEBATE_MODE_OPTIONS["full"][0]),
+    horizontal=True,
+)
+selected_debate_mode = debate_mode_keys[debate_mode_labels.index(selected_debate_label)]
+st.caption(DEBATE_MODE_OPTIONS[selected_debate_mode][1])
 
 st.divider()
 st.subheader("Повторный мозговой штурм с контекстом")
@@ -488,6 +593,7 @@ uploaded_context_files = st.file_uploader(
     "Добавить файлы в контекст",
     type=SUPPORTED_CONTEXT_FILE_TYPES,
     accept_multiple_files=True,
+    help="Файлы обрабатываются на backend: PDF/OCR, pptx, Excel, JSON и др.",
 )
 rerun_cols = st.columns(2)
 rerun_fast_clicked = rerun_cols[0].button("Повторить обычный brainstorm")
@@ -497,29 +603,26 @@ st.divider()
 st.subheader("Спросить выбранную модель")
 
 health_data = st.session_state.health_data or {}
-agent_options = [
-    {
-        "role": agent.get("role", ""),
-        "model": agent.get("model", "unknown"),
-    }
-    for agent in health_data.get("agents", [])
-    if agent.get("role")
-]
+agent_options = list(health_data.get("agents") or [])
 synthesis = health_data.get("synthesis") or {}
 if synthesis.get("model"):
-    agent_options.append({"role": "Модератор", "model": synthesis.get("model", "unknown")})
+    agent_options.append(
+        {
+            "role": "Модератор",
+            "model": synthesis.get("model", "unknown"),
+            "display_name": synthesis.get("display_name", "Модератор"),
+            "description": synthesis.get("description", ""),
+        }
+    )
 
 if not agent_options:
-    agent_options = [
-        {"role": "Продуктовый стратег", "model": "openrouter/openai/gpt-5.1"},
-        {"role": "Креативный маркетолог", "model": "openrouter/anthropic/claude-sonnet-4.6"},
-        {"role": "Технический архитектор", "model": "openrouter/~google/gemini-pro-latest"},
-        {"role": "Модератор", "model": "openrouter/openai/gpt-5.1"},
-    ]
+    st.info("Список моделей появится после подключения к бэкенду (/health).")
+    agent_options = [{"role": "", "model": "", "display_name": "—", "description": ""}]
 
 selected_agent_label = st.selectbox(
     "Выберите модель",
     options=[_agent_option_label(item) for item in agent_options],
+    disabled=not health_data.get("agents"),
 )
 selected_agent = agent_options[
     [_agent_option_label(item) for item in agent_options].index(selected_agent_label)
@@ -538,7 +641,8 @@ ask_clicked = st.button("Спросить выбранную модель")
 
 
 def _render_history_entry(entry: dict) -> None:
-    if entry.get("mode") == "debate":
+    history_mode = entry.get("mode") or ""
+    if history_mode.startswith("debate"):
         st.info("Показан последний debate-результат из истории текущей сессии.")
         _render_debate_result(entry["data"])
     elif entry.get("mode") == "ask_agent":
@@ -560,28 +664,19 @@ if run_clicked or debate_clicked:
             "comments": initial_comments.strip() or None,
         }
         is_debate = debate_clicked
-        request_url = DEBATE_URL if is_debate else BRAINSTORM_URL
-        mode = "debate" if is_debate else "fast"
         status_title = "Столкновение моделей запущено..." if is_debate else "Запускаю мозговой штурм..."
         status_done = "Спор моделей завершён" if is_debate else "Мозговой штурм готов"
-        timeout_s = 900 if is_debate else 300
         try:
             with st.status(status_title, expanded=True) as status:
-                st.write("Отправляю тему на бэкенд.")
-                logger.info("POST %s payload=%s", request_url, json.dumps(payload, ensure_ascii=False))
-                response = requests.post(
-                    request_url,
-                    json=payload,
-                    headers={"Content-Type": "application/json"},
-                    timeout=timeout_s,
-                )
                 if is_debate:
-                    st.write("Модели дают первичные ответы, критикуют друг друга и дорабатывают решение.")
+                    payload["debate_mode"] = selected_debate_mode
+                    data, mode = _run_debate_with_job(payload, status)
                 else:
+                    st.write("Отправляю тему на бэкенд.")
+                    logger.info("POST %s topic=%s", BRAINSTORM_URL, payload.get("topic"))
+                    data = _post_json(BRAINSTORM_URL, payload, timeout=300)
+                    mode = "fast"
                     st.write("Получаю ответы экспертов и итоговый синтез.")
-                if response.status_code >= 400:
-                    raise requests.HTTPError(_backend_error_message(response), response=response)
-                data = response.json()
                 status.update(label=status_done, state="complete", expanded=False)
         except requests.HTTPError as exc:
             logger.exception(
@@ -593,9 +688,9 @@ if run_clicked or debate_clicked:
         except requests.RequestException as exc:
             logger.exception("Request to backend failed: %s", exc)
             st.error(f"Не удалось связаться с бэкендом: {exc}")
-        except ValueError as exc:
-            logger.exception("Invalid JSON from backend: %s", exc)
-            st.error(f"Некорректный ответ сервера (не JSON): {exc}")
+        except (ValueError, TimeoutError, RuntimeError) as exc:
+            logger.exception("Debate/brainstorm failed: %s", exc)
+            st.error(str(exc))
         else:
             st.session_state.brainstorm_history.append(
                 {
@@ -620,8 +715,6 @@ elif rerun_fast_clicked or rerun_debate_clicked:
         st.warning("Введите тему или выберите запись истории для повторного запуска.")
     else:
         is_debate_rerun = rerun_debate_clicked
-        request_url = DEBATE_URL if is_debate_rerun else BRAINSTORM_URL
-        mode = "debate_rerun" if is_debate_rerun else "fast_rerun"
         payload = {
             "topic": rerun_topic,
             "context": combined_context,
@@ -633,21 +726,17 @@ elif rerun_fast_clicked or rerun_debate_clicked:
             else "Повторный мозговой штурм запущен..."
         )
         status_done = "Повторный запуск завершён"
-        timeout_s = 900 if is_debate_rerun else 300
 
         try:
             with st.status(status_title, expanded=True) as status:
-                st.write("Отправляю тему, контекст и комментарии на бэкенд.")
-                logger.info("POST %s payload=%s", request_url, json.dumps(payload, ensure_ascii=False))
-                response = requests.post(
-                    request_url,
-                    json=payload,
-                    headers={"Content-Type": "application/json"},
-                    timeout=timeout_s,
-                )
-                if response.status_code >= 400:
-                    raise requests.HTTPError(_backend_error_message(response), response=response)
-                data = response.json()
+                if is_debate_rerun:
+                    payload["debate_mode"] = selected_debate_mode
+                    data, mode = _run_debate_with_job(payload, status, rerun=True)
+                else:
+                    st.write("Отправляю тему, контекст и комментарии на бэкенд.")
+                    logger.info("POST %s topic=%s", BRAINSTORM_URL, payload.get("topic"))
+                    data = _post_json(BRAINSTORM_URL, payload, timeout=300)
+                    mode = "fast_rerun"
                 status.update(label=status_done, state="complete", expanded=False)
         except requests.HTTPError as exc:
             logger.exception(
@@ -659,9 +748,9 @@ elif rerun_fast_clicked or rerun_debate_clicked:
         except requests.RequestException as exc:
             logger.exception("Request to backend failed: %s", exc)
             st.error(f"Не удалось связаться с бэкендом: {exc}")
-        except ValueError as exc:
-            logger.exception("Invalid JSON from backend: %s", exc)
-            st.error(f"Некорректный ответ сервера (не JSON): {exc}")
+        except (ValueError, TimeoutError, RuntimeError) as exc:
+            logger.exception("Rerun failed: %s", exc)
+            st.error(str(exc))
         else:
             st.session_state.brainstorm_history.append(
                 {
@@ -687,7 +776,7 @@ elif ask_clicked:
         }
         try:
             with st.status("Отправляю вопрос выбранной модели...", expanded=True) as status:
-                logger.info("POST %s payload=%s", ASK_AGENT_URL, json.dumps(payload, ensure_ascii=False))
+                logger.info("POST %s role=%s", ASK_AGENT_URL, selected_agent.get("role"))
                 response = requests.post(
                     ASK_AGENT_URL,
                     json=payload,

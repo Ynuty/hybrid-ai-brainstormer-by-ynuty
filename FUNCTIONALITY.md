@@ -6,11 +6,11 @@ AI Brainstorm — приложение для мозгового штурма с
 
 ## На чем работает
 
-- Backend: FastAPI в `main.py`.
+- Backend: FastAPI в пакете `app/` (точка входа `main.py`).
 - Frontend: Streamlit в `ui.py`.
 - LLM-вызовы: LiteLLM через OpenRouter.
-- Конфигурация моделей: `agents_config.yaml`.
-- Переменные окружения: `.env` / `.env.main`, пример в `.env.example`.
+- Конфигурация моделей и ролей: `agents_config.yaml` (`display_name`, `description`).
+- Секреты и инфраструктура: `.env.main`, шаблон `.env.example`.
 - Основной API-ключ: `OPENROUTER_API_KEY`.
 
 ## Текущие модели и роли
@@ -110,25 +110,38 @@ Response содержит:
 
 ### `POST /brainstorm/debate`
 
-Режим спора моделей.
+Запускает спор моделей в фоне. Сразу возвращает `job_id`; результат — через polling.
 
 Request:
 
 ```json
 {
-  "topic": "Тема мозгового штурма"
+  "topic": "Тема",
+  "debate_mode": "full",
+  "context": null,
+  "comments": null
 }
 ```
 
-Response содержит:
+`debate_mode`: `full` (4 этапа, ~10 LLM) или `light` (3 этапа, ~7 LLM, без доработки экспертов).
 
-- `topic`;
-- `mode`;
-- `initial_responses`;
-- `critiques`;
-- `revised_responses`;
-- `final_synthesis`;
-- `debate_report`.
+Response: `{ "job_id", "status", "debate_mode", "poll_url" }`.
+
+### `GET /jobs/{job_id}`
+
+Статус задачи, прогресс по этапам, `partial`, финальный `result` при `status=done`.
+
+### `POST /brainstorm/debate/sync`
+
+Блокирующий спор (legacy), тот же pipeline без job.
+
+### `POST /context/extract`
+
+Загрузка файла (PDF/txt) → текст для контекста (OCR на backend).
+
+### `POST /brainstorm/jobs`
+
+Фоновый быстрый brainstorm (опционально, через job + polling).
 
 ### `POST /agents/ask`
 
@@ -177,8 +190,9 @@ Streamlit UI умеет:
 - показывать ответы в Markdown;
 - хранить историю текущей сессии;
 - использовать последний результат как контекст для вопроса модели;
-- добавлять текстовые файлы и PDF в контекст;
-- читать текстовый слой PDF и выполнять OCR для сканированных PDF при настроенном Tesseract;
+- добавлять файлы в контекст через backend `/context/extract`;
+- выбирать режим спора: полный или быстрый;
+- экспортировать/импортировать историю сессии (JSON);
 - скачивать результаты в Markdown.
 
 ## Настройки окружения
@@ -200,16 +214,16 @@ AGENTS_CONFIG_PATH=agents_config.yaml
 MODEL_TIMEOUT_S=120
 MODEL_RETRY_ATTEMPTS=2
 MODEL_RETRY_BACKOFF_S=1.5
-TESSERACT_CMD=
+TESSERACT_PATH="C:\Program Files\Tesseract-OCR\tesseract.exe"
 PDF_OCR_DPI=200
 BRAINSTORM_MODEL=openrouter/openai/gpt-5.1
 SYNTHESIS_MODEL=openrouter/openai/gpt-5.1
 ```
 
-Для полной читаемости сканированных PDF нужен системный Tesseract OCR. Если `tesseract.exe` не доступен в `PATH`, укажите путь в `TESSERACT_CMD`, например:
+Для полной читаемости сканированных PDF нужен системный Tesseract OCR. Если `tesseract.exe` не доступен в `PATH`, укажите путь в `TESSERACT_PATH`, например:
 
 ```env
-TESSERACT_CMD=C:\Program Files\Tesseract-OCR\tesseract.exe
+TESSERACT_PATH="C:\Program Files\Tesseract-OCR\tesseract.exe"
 ```
 
 ## Запуск
@@ -228,20 +242,13 @@ Frontend:
 
 ## Проверки
 
-Проверка Python-синтаксиса:
-
 ```powershell
-.\.venv\Scripts\python.exe -m py_compile main.py ui.py
+.\.venv\Scripts\pip.exe install -r requirements-dev.txt
+.\.venv\Scripts\python.exe -m pytest tests/ -q
 ```
 
-Проверка YAML:
+Docker:
 
 ```powershell
-.\.venv\Scripts\python.exe -c "import yaml, pathlib; yaml.safe_load(pathlib.Path('agents_config.yaml').read_text(encoding='utf-8')); print('YAML OK')"
-```
-
-Проверка зарегистрированных FastAPI routes:
-
-```powershell
-.\.venv\Scripts\python.exe -c "import main; print('\n'.join(sorted(route.path for route in main.app.routes)))"
+docker compose up --build
 ```
